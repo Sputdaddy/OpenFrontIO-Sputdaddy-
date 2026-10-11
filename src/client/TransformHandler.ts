@@ -6,6 +6,11 @@ import {
   ZOOM_DELTA_DIVISOR,
   ZoomEvent,
 } from "./InputHandler";
+import {
+  drawnGroundPoint,
+  type SurfaceElevation,
+  surfaceUnderGroundPoint,
+} from "./render/three/Elevation";
 import { GameView, PlayerView, UnitView } from "./view";
 
 export class GoToPlayerEvent implements GameEvent {
@@ -41,6 +46,8 @@ export class TransformHandler {
   private targetScale: number | null = null;
   private intervalID: NodeJS.Timeout | null = null;
   private changed = false;
+  // The 3D map's raised, tilted surface; null on the flat map.
+  private elevation: SurfaceElevation | null = null;
 
   constructor(
     private game: GameView,
@@ -54,6 +61,15 @@ export class TransformHandler {
     this.eventBus.on(GoToPositionEvent, (e) => this.onGoToPosition(e));
     this.eventBus.on(GoToUnitEvent, (e) => this.onGoToUnit(e));
     this.eventBus.on(CenterCameraEvent, () => this.centerCamera());
+  }
+
+  /**
+   * Make screen↔tile conversions follow the 3D map's raised ground, which
+   * its tilted camera draws further up the screen than sea level.
+   */
+  setElevation(elevation: SurfaceElevation | null): void {
+    this.elevation = elevation;
+    this.changed = true;
   }
 
   public updateCanvasBoundingRect() {
@@ -93,7 +109,9 @@ export class TransformHandler {
     // Step 1: Convert from Cell coordinates to game coordinates
     // (reverse of Math.floor operation - we'll use the exact values)
     const gameX = cell.x;
-    const gameY = cell.y;
+    const gameY = this.elevation
+      ? drawnGroundPoint(this.elevation, cell.x, cell.y).y
+      : cell.y;
 
     // Step 2: Reverse the game center offset calculation
     // Original: gameX = centerX + this.game.width() / 2
@@ -138,6 +156,9 @@ export class TransformHandler {
       (canvasCoords.y - this.game.height() / 2) / this.scale +
       this.offsetY +
       this.game.height() / 2;
+    if (this.elevation) {
+      return surfaceUnderGroundPoint(this.elevation, gameX, gameY);
+    }
     return { x: gameX, y: gameY };
   }
 
@@ -177,7 +198,12 @@ export class TransformHandler {
       (canvasHeight - this.game.height() / 2) / this.scale + this.offsetY;
 
     const gameRightX = rightX + this.game.width() / 2;
-    const gameBottomY = bottomY + this.game.height() / 2;
+    // On the 3D map, raised ground south of the bottom edge is drawn up
+    // into view.
+    const gameBottomY =
+      bottomY +
+      this.game.height() / 2 +
+      (this.elevation ? this.elevation.shift * this.elevation.maxHeight : 0);
 
     return [
       new Cell(Math.floor(gameLeftX), Math.floor(gameTopY)),

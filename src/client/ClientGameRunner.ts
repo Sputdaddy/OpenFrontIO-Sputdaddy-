@@ -867,6 +867,9 @@ async function createClientGame(
       view,
       mapLayerController,
     );
+    if (ThreeRenderer !== null && view instanceof ThreeRenderer) {
+      gameRenderer.transformHandler.setElevation(view.elevation);
+    }
 
     const metrics = new GameMetrics(lobbyConfig.gameID, clientID);
     const { builder: webglBuilder, stopFrameLoop } = mountWebGLFrameLoop(

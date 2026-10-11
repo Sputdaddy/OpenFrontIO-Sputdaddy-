@@ -3,6 +3,8 @@ import {
   buildHeightGrid,
   buildReliefNormals,
   gridStep,
+  hillsAt,
+  SurfaceHeights,
   tileHeight,
 } from "../src/client/render/three/Heightfield";
 
@@ -16,6 +18,34 @@ describe("Three.js heightfield", () => {
     expect(tileHeight(land(25))).toBeGreaterThan(tileHeight(land(5)));
     expect(tileHeight(water(1))).toBeLessThan(0);
     expect(tileHeight(water(20))).toBeLessThan(tileHeight(water(2)));
+  });
+
+  it("keeps plains and highlands low and lets mountains climb", () => {
+    const plainsRise = tileHeight(land(9)) - tileHeight(land(0));
+    const highlandRise = tileHeight(land(19)) - tileHeight(land(10));
+    const mountainRise = tileHeight(land(30)) - tileHeight(land(20));
+    expect(plainsRise).toBeLessThan(0.5);
+    expect(highlandRise).toBeLessThan(1);
+    expect(mountainRise).toBeGreaterThan(4 * highlandRise);
+  });
+
+  it("scatters hills over a small part of the land, the same every time", () => {
+    let hilly = 0;
+    let total = 0;
+    let max = 0;
+    for (let y = 0; y < 1000; y += 7) {
+      for (let x = 0; x < 2000; x += 7) {
+        const h = hillsAt(x, y);
+        max = Math.max(max, h);
+        if (h > 0.2) hilly++;
+        total++;
+      }
+    }
+    expect(hillsAt(123.5, 456.5)).toBe(hillsAt(123.5, 456.5));
+    expect(max).toBeGreaterThan(1);
+    expect(max).toBeLessThan(15);
+    expect(hilly / total).toBeGreaterThan(0.02);
+    expect(hilly / total).toBeLessThan(0.25);
   });
 
   it("keeps the mesh under a million vertices on big maps", () => {
@@ -74,5 +104,30 @@ describe("Three.js heightfield", () => {
     expect(n[centre]).toBeLessThan(128); // normal x points west
     expect(Math.abs(n[centre + 1] - 128)).toBeLessThanOrEqual(1); // flat north-south
     expect(n[centre + 2]).toBeGreaterThan(128); // still facing up
+  });
+
+  it("samples the drawn surface, with water at sea level", () => {
+    const w = 20;
+    const h = 10;
+    const terrain = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        terrain[y * w + x] = x < w / 2 ? land(10) : water(5);
+      }
+    }
+    const geo = buildHeightGrid(terrain, w, h);
+    const surface = new SurfaceHeights(geo, w, h);
+    const pos = geo.getAttribute("position");
+    for (let v = 0; v < pos.count; v++) {
+      expect(surface.at(pos.getX(v), pos.getZ(v))).toBeCloseTo(
+        Math.max(0, pos.getY(v)),
+        5,
+      );
+    }
+    expect(surface.at(2, 5)).toBeGreaterThan(0);
+    expect(surface.at(18, 5)).toBe(0);
+    expect(surface.maxHeight).toBeGreaterThan(0);
+    // Off the map it holds the edge height.
+    expect(surface.at(-5, -5)).toBeCloseTo(surface.at(0, 0), 5);
   });
 });
