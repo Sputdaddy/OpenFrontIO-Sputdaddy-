@@ -183,3 +183,50 @@ function blur3(src: Float32Array, w: number, h: number): Float32Array {
   }
   return out;
 }
+
+/**
+ * Heights of the drawn surface, read back from a mesh built by
+ * buildHeightGrid: the terrain where it is above sea level, else the water
+ * plane at 0. Bilinear between grid vertices, so it matches the mesh.
+ */
+export class SurfaceHeights {
+  readonly maxHeight: number;
+  private readonly step: number;
+  private readonly gw: number;
+  private readonly gh: number;
+  private readonly heights: Float32Array;
+
+  constructor(geometry: BufferGeometry, mapW: number, mapH: number) {
+    this.step = gridStep(mapW, mapH);
+    this.gw = Math.ceil(mapW / this.step) + 1;
+    this.gh = Math.ceil(mapH / this.step) + 1;
+    const pos = geometry.getAttribute("position");
+    this.heights = new Float32Array(this.gw * this.gh);
+    let max = 0;
+    for (let g = 0; g < this.heights.length; g++) {
+      const h = Math.max(0, pos.getY(g));
+      this.heights[g] = h;
+      max = Math.max(max, h);
+    }
+    this.maxHeight = max;
+  }
+
+  /** Surface height at a point in tile space (x east, y south). */
+  at(x: number, y: number): number {
+    const gx = clamp(x / this.step, 0, this.gw - 1);
+    const gy = clamp(y / this.step, 0, this.gh - 1);
+    const i = Math.min(Math.floor(gx), this.gw - 2);
+    const j = Math.min(Math.floor(gy), this.gh - 2);
+    const fx = gx - i;
+    const fy = gy - j;
+    const h = this.heights;
+    const a = j * this.gw + i;
+    const top = h[a] + (h[a + 1] - h[a]) * fx;
+    const bottom = h[a + this.gw] + (h[a + this.gw + 1] - h[a + this.gw]) * fx;
+    return top + (bottom - top) * fy;
+  }
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}

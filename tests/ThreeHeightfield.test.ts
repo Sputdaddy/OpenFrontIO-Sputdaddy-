@@ -3,6 +3,7 @@ import {
   buildHeightGrid,
   buildReliefNormals,
   gridStep,
+  SurfaceHeights,
   tileHeight,
 } from "../src/client/render/three/Heightfield";
 
@@ -74,5 +75,30 @@ describe("Three.js heightfield", () => {
     expect(n[centre]).toBeLessThan(128); // normal x points west
     expect(Math.abs(n[centre + 1] - 128)).toBeLessThanOrEqual(1); // flat north-south
     expect(n[centre + 2]).toBeGreaterThan(128); // still facing up
+  });
+
+  it("samples the drawn surface, with water at sea level", () => {
+    const w = 20;
+    const h = 10;
+    const terrain = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        terrain[y * w + x] = x < w / 2 ? land(10) : water(5);
+      }
+    }
+    const geo = buildHeightGrid(terrain, w, h);
+    const surface = new SurfaceHeights(geo, w, h);
+    const pos = geo.getAttribute("position");
+    for (let v = 0; v < pos.count; v++) {
+      expect(surface.at(pos.getX(v), pos.getZ(v))).toBeCloseTo(
+        Math.max(0, pos.getY(v)),
+        5,
+      );
+    }
+    expect(surface.at(2, 5)).toBeGreaterThan(0);
+    expect(surface.at(18, 5)).toBe(0);
+    expect(surface.maxHeight).toBeGreaterThan(0);
+    // Off the map it holds the edge height.
+    expect(surface.at(-5, -5)).toBeCloseTo(surface.at(0, 0), 5);
   });
 });
