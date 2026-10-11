@@ -60,6 +60,9 @@ PALETTE = {
     "Hazard": ("#e8b52c", 0.7, 0.0),
     "Dark": ("#262b31", 0.6, 0.0),
     "Missile": ("#ebebe7", 0.5, 0.0),
+    "Gantry": ("#b4472d", 0.55, 0.3),
+    "Olive": ("#5a6141", 0.7, 0.1),
+    "Lamp": ("#fff3cf", 0.3, 0.0),
     "CarRed": ("#c23b32", 0.4, 0.2),
     "CarWhite": ("#e9eaec", 0.4, 0.2),
     "CarYellow": ("#e6b422", 0.4, 0.2),
@@ -109,11 +112,6 @@ def rot_z(deg):
 
 def scale(x, y, z):
     return Matrix.Diagonal((x, y, z, 1.0))
-
-
-# Maps a prism built along local Z with its profile in local XY onto one
-# extruded along world X with the profile in world YZ (for gable roofs).
-ALONG_X = Matrix(((0, 0, 1, 0), (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
 
 
 class Model:
@@ -208,23 +206,72 @@ class Model:
         rings = [[(x, y, z0) for x, y in poly], [(x, y, z1) for x, y in poly]]
         self.loft(rings, [material], material, material, bevel, m)
 
-    def gable_roof(self, x, y, z0, length, width, height, material, rz=0.0,
-                   bevel=0.0):
-        """Gable roof whose ridge runs along X (before rz), eaves at z0."""
-        profile = [(-width / 2, 0.0), (width / 2, 0.0), (0.0, height)]
-        m = translate(x, y, z0) @ rot_z(rz) @ ALONG_X
-        self.prism(profile, -length / 2, length / 2, material, bevel, m)
-
-    def pyramid_roof(self, x, y, z0, side, height, material, rz=0.0):
-        r = side / math.sqrt(2)
-        self.cylinder(x, y, z0, z0 + height, r, material, r2=0.0, segments=4,
-                      rz=45 + rz)
-
-    def sphere(self, x, y, z, r, material, subdivisions=1, sz=1.0):
-        matrix = translate(x, y, z) @ scale(1.0, 1.0, sz)
+    def sphere(self, x, y, z, r, material, subdivisions=1, sz=1.0, sx=1.0,
+               sy=1.0):
+        matrix = translate(x, y, z) @ scale(sx, sy, sz)
         verts = bmesh.ops.create_icosphere(
             self.bm, subdivisions=subdivisions, radius=r, matrix=matrix
         )["verts"]
+        self._finish(verts, material, 0.0)
+
+    def _cube(self, matrix, material, bevel=0.0):
+        verts = bmesh.ops.create_cube(self.bm, size=1.0, matrix=matrix)["verts"]
+        self._finish(verts, material, bevel)
+
+    def oriented_box(self, matrix, sx, sy, sz, material, bevel=0.0):
+        """Box of size (sx, sy, sz) centred on matrix's origin."""
+        self._cube(matrix @ scale(sx, sy, sz), material, bevel)
+
+    def beam(self, p0, p1, w, material, h=None, bevel=0.0):
+        """Square (w x h) bar from p0 to p1."""
+        p0, p1 = Vector(p0), Vector(p1)
+        d = p1 - p0
+        rot = d.to_track_quat("Z", "Y").to_matrix().to_4x4()
+        matrix = Matrix.Translation((p0 + p1) / 2) @ rot
+        self._cube(matrix @ scale(w, h or w, d.length), material, bevel)
+
+    def rod(self, p0, p1, r, material, segments=8, r2=None):
+        """Cylinder (or cone, r2) from p0 to p1."""
+        p0, p1 = Vector(p0), Vector(p1)
+        d = p1 - p0
+        rot = d.to_track_quat("Z", "Y").to_matrix().to_4x4()
+        matrix = Matrix.Translation((p0 + p1) / 2) @ rot
+        self.cylinder(0, 0, -d.length / 2, d.length / 2, r, material, r2=r2,
+                      segments=segments, m=matrix)
+
+    def frustum(self, x, y, z0, z1, sx0, sy0, sx1, sy1, material, dy1=0.0,
+                top_material=None, bevel=0.0, rz=0.0):
+        """Rectangular block that narrows from (sx0, sy0) at z0 to
+        (sx1, sy1) at z1, its top shifted dy1 along Y."""
+        def rect(sx, sy, dy, z):
+            return [(-sx / 2, -sy / 2 + dy, z), (sx / 2, -sy / 2 + dy, z),
+                    (sx / 2, sy / 2 + dy, z), (-sx / 2, sy / 2 + dy, z)]
+        m = translate(x, y, 0) @ rot_z(rz)
+        self.loft([rect(sx0, sy0, 0.0, z0), rect(sx1, sy1, dy1, z1)], [material],
+                  top_material or material, material, bevel, m)
+
+    def ring(self, x, y, z0, z1, r_in, r_out, material, segments=24,
+             a0=0.0, a1=360.0):
+        """Flat annulus (or an arc of one, from a0 to a1 degrees)."""
+        full = abs(a1 - a0) >= 360.0
+        n = segments if full else segments + 1
+        pts = []
+        for i in range(n):
+            a = math.radians(a0 + (a1 - a0) * i / segments)
+            pts.append((math.cos(a), math.sin(a)))
+        bm = self.bm
+        rows = [[bm.verts.new((x + c * r, y + s * r, z)) for c, s in pts]
+                for r, z in ((r_out, z0), (r_out, z1), (r_in, z1), (r_in, z0))]
+        steps = n if full else n - 1
+        for k in range(4):
+            a, b = rows[k], rows[(k + 1) % 4]
+            for i in range(steps):
+                j = (i + 1) % n
+                bm.faces.new((a[i], a[j], b[j], b[i]))
+        if not full:
+            for i in (0, n - 1):
+                bm.faces.new([rows[k][i] for k in range(4)])
+        verts = [v for row in rows for v in row]
         self._finish(verts, material, 0.0)
 
     def to_object(self):
@@ -377,106 +424,353 @@ def build_city():
     return m.to_object()
 
 
-def turret(m, y, z, facing, raised=0.0):
-    """Twin-gun turret on the centreline at (0, y), base at z. facing is
-    -1 for the bow (-Y), +1 for the stern."""
-    if raised > 0:
-        m.cylinder(0, y, z, z + raised, 0.042, "MetalDark", segments=12)
-        z += raised
-    m.cylinder(0, y, z, z + 0.012, 0.038, "MetalDark", segments=12)
-    z += 0.012
-    housing = [(-0.034, -0.03), (0.034, -0.03), (0.034, 0.04), (-0.034, 0.04)]
-    housing = [(px, py * -facing) for px, py in housing]
-    if facing > 0:
-        housing = list(reversed(housing))
-    shift = translate(0, y, 0)
-    m.prism(housing, z, z + 0.032, "MetalLight", bevel=0.008, m=shift)
-    for bx in (-0.014, 0.014):
-        start = y + facing * 0.025
-        length = 0.085
-        matrix = translate(bx, start + facing * length / 2, z + 0.016)
-        matrix = matrix @ rot_x(90)
-        m.cylinder(0, 0, -length / 2, length / 2, 0.0055, "MetalDark",
-                   segments=6, m=matrix)
+def frustum_band(m, x, y, z0, z1, sx0, sy0, sx1, sy1, dy1, za, zb, grow,
+                 material):
+    """A band hugging the sides of a frustum between heights za and zb."""
+    def at(z):
+        f = (z - z0) / (z1 - z0)
+        return sx0 + (sx1 - sx0) * f, sy0 + (sy1 - sy0) * f, dy1 * f
+    ax, ay, ady = at(za)
+    bx, by, bdy = at(zb)
+    m.frustum(x, y + ady, za, zb, ax + grow, ay + grow, bx + grow, by + grow,
+              material, dy1=bdy - ady)
+
+
+def ciws(m, x, y, z, facing):
+    """Close-in weapon system: pedestal, white radome, gun barrel."""
+    m.cylinder(x, y, z, z + 0.006, 0.013, "MetalDark", segments=12)
+    m.cylinder(x, y, z + 0.006, z + 0.02, 0.0095, "Missile", segments=12)
+    m.sphere(x, y, z + 0.025, 0.01, "Missile", subdivisions=2, sz=1.25)
+    m.rod((x, y + facing * 0.006, z + 0.014), (x, y + facing * 0.032, z + 0.015),
+          0.002, "MetalDark", 6)
+
+
+def helicopter(m, x, y, z):
+    for side in (-1, 1):
+        m.rod((x + side * 0.012, y - 0.022, z + 0.003),
+              (x + side * 0.012, y + 0.026, z + 0.003), 0.0016, "MetalDark", 6)
+        for dy in (-0.01, 0.012):
+            m.beam((x + side * 0.012, y + dy, z + 0.003),
+                   (x + side * 0.006, y + dy, z + 0.013), 0.0015, "MetalDark")
+    m.sphere(x, y, z + 0.022, 0.015, "MetalLight", subdivisions=2, sy=1.5,
+             sz=0.9)
+    m.sphere(x, y - 0.012, z + 0.026, 0.0105, "Window", subdivisions=2,
+             sy=1.25, sz=0.85)
+    m.rod((x, y + 0.018, z + 0.026), (x, y + 0.078, z + 0.031), 0.0045,
+          "MetalLight", 8, r2=0.0022)
+    m.box(x, y + 0.076, z + 0.029, 0.002, 0.012, 0.016, "TeamColor")
+    m.cylinder(x, y, z + 0.036, z + 0.041, 0.003, "MetalDark", segments=8)
+    for a in (25, 115):
+        m.oriented_box(translate(x, y, z + 0.0425) @ rot_z(a), 0.1, 0.0045,
+                       0.0012, "MetalDark")
 
 
 def build_warship():
+    """A modern destroyer: stealth-shaped superstructure with an integrated
+    radar mast, a bow gun, missile cells, anti-ship missiles, boats, a
+    hangar and a helicopter on the flight deck."""
     m = Model("Warship")
-    # Hull outline from the bow (-Y) round the starboard side to the stern
-    # and back up the port side (counter-clockwise seen from above).
+    # Hull outline from the bow (-Y) round the starboard side to the
+    # transom and back up the port side (counter-clockwise from above).
     starboard = [
-        (0.0, -0.5), (0.035, -0.43), (0.068, -0.32), (0.09, -0.18),
-        (0.1, -0.02), (0.1, 0.3), (0.092, 0.42), (0.074, 0.5),
+        (0.0, -0.5), (0.03, -0.44), (0.058, -0.35), (0.078, -0.24),
+        (0.088, -0.12), (0.09, 0.0), (0.09, 0.3), (0.087, 0.42), (0.082, 0.5),
     ]
     outline = starboard + [(-x, y) for x, y in reversed(starboard) if x != 0.0]
 
-    def sheer(y):
-        # Deck rises toward the bow.
-        return 0.02 * max(0.0, (-y - 0.15) / 0.35)
+    def deck(y):
+        # Deck height, rising toward the bow.
+        return 0.06 + 0.018 * max(0.0, (-y - 0.1) / 0.4)
 
-    bottom = [(x * 0.5, y * 0.88, -0.045) for x, y in outline]
-    waterline = [(x * 0.96, y * 0.99, 0.012) for x, y in outline]
-    deck = [(x, y, 0.065 + sheer(y)) for x, y in outline]
-    m.loft([bottom, waterline, deck], ["MetalDark", "TeamColor"], "TeamDeck",
-           "MetalDark")
+    def ring(sx, bow, stern, z):
+        return [(x * sx, y * (bow if y < 0 else stern), z(y)) for x, y in outline]
 
-    # Superstructure, stepping up to the bridge.
-    m.box(0, 0.02, 0.065, 0.13, 0.27, 0.05, "MetalLight", bevel=0.006)
-    m.box(0, -0.05, 0.115, 0.1, 0.14, 0.04, "MetalLight", bevel=0.006)
-    m.box(0, -0.085, 0.155, 0.085, 0.07, 0.04, "MetalLight", bevel=0.005)
-    m.box(0, -0.087, 0.172, 0.089, 0.072, 0.013, "Dark")
-    # Mast with a yard and radar.
-    m.cylinder(0, -0.06, 0.195, 0.33, 0.005, "MetalDark", segments=6)
-    m.box(0, -0.06, 0.29, 0.08, 0.007, 0.007, "MetalDark")
-    m.box(0, -0.06, 0.33, 0.035, 0.012, 0.012, "MetalDark")
-    # Funnel with a team-colour band.
-    m.cylinder(0, 0.075, 0.115, 0.19, 0.034, "MetalLight", segments=12,
-               sx=0.75, bevel=0.004)
-    m.cylinder(0, 0.075, 0.19, 0.225, 0.036, "TeamColor", segments=12,
-               sx=0.75)
-    m.cylinder(0, 0.075, 0.225, 0.229, 0.03, "Dark", segments=12, sx=0.75)
+    m.loft(
+        [
+            ring(0.42, 0.88, 0.96, lambda y: -0.045),
+            ring(0.9, 0.98, 0.995, lambda y: 0.0),
+            ring(0.92, 0.985, 1.0, lambda y: 0.008),
+            ring(0.99, 1.0, 1.0, lambda y: 0.03 + 0.5 * (deck(y) - 0.06)),
+            ring(1.0, 1.0, 1.0, deck),
+        ],
+        ["MetalDark", "Dark", "TeamColor", "TeamColor"],
+        "TeamDeck",
+        "MetalDark",
+    )
 
-    turret(m, -0.3, 0.065 + sheer(-0.3), -1)
-    turret(m, -0.185, 0.065 + sheer(-0.185), -1, raised=0.03)
-    turret(m, 0.31, 0.065, 1)
+    # Guard rails along both sides.
+    rail = [(x - 0.004, y) for x, y in starboard[1:]]
+    for side in (-1, 1):
+        for (x0, y0), (x1, y1) in zip(rail, rail[1:]):
+            steps = max(1, round(math.hypot(x1 - x0, y1 - y0) / 0.035))
+            for i in range(steps + 1):
+                t = i / steps
+                px, py = side * (x0 + (x1 - x0) * t), y0 + (y1 - y0) * t
+                m.rod((px, py, deck(py)), (px, py, deck(py) + 0.012), 0.0012,
+                      "MetalLight", 4)
+            for h in (0.006, 0.012):
+                m.beam((side * x0, y0, deck(y0) + h), (side * x1, y1, deck(y1) + h),
+                       0.0014, "MetalLight")
+
+    # Foredeck: jackstaff, bollards, the gun and the missile cells.
+    m.rod((0, -0.485, deck(-0.485)), (0, -0.485, deck(-0.485) + 0.05), 0.0015,
+          "MetalDark", 6)
+    for bx in (-0.018, 0.018):
+        m.cylinder(bx, -0.41, deck(-0.41), deck(-0.41) + 0.008, 0.006,
+                   "MetalDark", segments=8)
+    gz = deck(-0.31)
+    m.cylinder(0, -0.31, gz, gz + 0.008, 0.032, "MetalDark", segments=16)
+    m.frustum(0, -0.31, gz + 0.008, gz + 0.04, 0.06, 0.07, 0.036, 0.04,
+              "MetalLight", dy1=0.01, bevel=0.003)
+    m.rod((0, -0.33, gz + 0.022), (0, -0.43, gz + 0.026), 0.0045, "MetalDark", 8)
+    m.rod((0, -0.424, gz + 0.0258), (0, -0.437, gz + 0.0263), 0.0058,
+          "MetalDark", 8)
+    vz = deck(-0.215)
+    m.box(0, -0.215, vz, 0.075, 0.07, 0.005, "MetalDark")
+    for i in range(4):
+        for j in range(4):
+            m.box(-0.0255 + i * 0.017, -0.2405 + j * 0.017, vz + 0.005, 0.014,
+                  0.014, 0.0015, "MetalLight")
+
+    # Deckhouse, bridge and the integrated mast with radar panels.
+    m.frustum(0, 0.01, 0.06, 0.118, 0.13, 0.36, 0.112, 0.33, "MetalLight",
+              dy1=0.006, bevel=0.003)
+    bridge = (0, -0.065, 0.118, 0.162, 0.108, 0.1, 0.088, 0.078, 0.007)
+    bx, by, bz0, bz1, bsx0, bsy0, bsx1, bsy1, bdy = bridge
+    m.frustum(bx, by, bz0, bz1, bsx0, bsy0, bsx1, bsy1, "MetalLight", dy1=bdy,
+              bevel=0.002)
+    frustum_band(m, bx, by, bz0, bz1, bsx0, bsy0, bsx1, bsy1, bdy, 0.137,
+                 0.149, 0.003, "Window")
+    for side in (-1, 1):
+        m.box(side * 0.058, -0.095, 0.142, 0.02, 0.026, 0.005, "MetalLight")
+    ciws(m, 0, -0.132, 0.118, -1)
+
+    my = by + bdy
+    m.frustum(0, my, 0.162, 0.27, 0.07, 0.066, 0.036, 0.034, "MetalLight",
+              bevel=0.002)
+    pz, hx, hy = 0.205, 0.0282, 0.0266
+    for matrix, sx, sy in (
+        (translate(0, my - hy - 0.0015, pz) @ rot_x(-8.4), 0.034, 0.003),
+        (translate(0, my + hy + 0.0015, pz) @ rot_x(8.4), 0.034, 0.003),
+        (translate(hx + 0.0015, my, pz) @ rot_y(-8.9), 0.003, 0.034),
+        (translate(-hx - 0.0015, my, pz) @ rot_y(8.9), 0.003, 0.034),
+    ):
+        m.oriented_box(matrix, sx, sy, 0.04, "Dark")
+    m.box(0, my, 0.27, 0.05, 0.048, 0.004, "MetalDark")
+    m.rod((0, my, 0.274), (0, my, 0.36), 0.0035, "MetalDark", 6)
+    m.beam((-0.035, my, 0.33), (0.035, my, 0.33), 0.003, "MetalDark")
+    m.box(0, my, 0.297, 0.05, 0.008, 0.006, "MetalDark")
+    m.sphere(0, my, 0.366, 0.009, "Missile", subdivisions=2)
+    m.box(0.03, my, 0.316, 0.002, 0.016, 0.011, "TeamColor")
+
+    # Funnel with a team-colour band and twin exhausts.
+    funnel = (0, 0.075, 0.118, 0.2, 0.062, 0.056, 0.046, 0.04, 0.006)
+    fx, fy, fz0, fz1, fsx0, fsy0, fsx1, fsy1, fdy = funnel
+    m.frustum(fx, fy, fz0, fz1, fsx0, fsy0, fsx1, fsy1, "MetalLight", dy1=fdy,
+              bevel=0.002)
+    frustum_band(m, fx, fy, fz0, fz1, fsx0, fsy0, fsx1, fsy1, fdy, 0.172,
+                 0.188, 0.002, "TeamColor")
+    m.frustum(fx, fy + fdy, fz1, fz1 + 0.004, fsx1, fsy1, fsx1 - 0.006,
+              fsy1 - 0.006, "Dark")
+    for ex in (-0.009, 0.009):
+        m.rod((ex, fy + fdy, fz1), (ex, fy + fdy, fz1 + 0.016), 0.0055, "Dark", 10)
+
+    # Anti-ship missile canisters, angled out over each side.
+    for side in (-1, 1):
+        out = Vector((side * 0.94, -0.34, 0.0)).normalized()
+        up = Vector((0, 0, 1))
+        along = (out + up * 0.18).normalized()
+        across = out.cross(up).normalized()
+        base = Vector((side * 0.024, 0.145, 0.118))
+        m.box(base.x + side * 0.012, base.y, 0.118, 0.03, 0.04, 0.006, "MetalDark")
+        for a in (-0.0055, 0.0055):
+            for b in (0.0, 0.0105):
+                p0 = base + across * a + Vector((0, 0, 0.012 + b))
+                m.beam(p0, p0 + along * 0.05, 0.0095, "MetalLight")
+
+    # Boats in davits and life-raft canisters along the deckhouse.
+    for side in (-1, 1):
+        for y in (-0.02, 0.12):
+            m.frustum(side * 0.074, y, 0.08, 0.091, 0.018, 0.048, 0.017, 0.044,
+                      "Dark", bevel=0.002)
+            m.box(side * 0.074, y, 0.091, 0.012, 0.034, 0.004, "Hazard")
+            for dy in (-0.018, 0.018):
+                m.beam((side * 0.06, y + dy, 0.118), (side * 0.076, y + dy, 0.104),
+                       0.0022, "MetalDark")
+        for y in (-0.13, -0.11, 0.165, 0.185):
+            m.rod((side * 0.076, y - 0.008, 0.068), (side * 0.076, y + 0.008, 0.068),
+                  0.0065, "Missile", 8)
+
+    # Hangar with its door, a second CIWS and whip antennas.
+    m.frustum(0, 0.255, 0.06, 0.135, 0.122, 0.13, 0.11, 0.118, "MetalLight",
+              dy1=-0.004, bevel=0.003)
+    m.box(0, 0.3215, 0.06, 0.082, 0.003, 0.058, "MetalDark")
+    for k in range(1, 5):
+        m.box(0, 0.3235, 0.06 + k * 0.0115, 0.08, 0.002, 0.0015, "Dark")
+    ciws(m, 0, 0.235, 0.135, 1)
+    for wx in (-0.045, 0.045):
+        m.rod((wx, 0.29, 0.135), (wx, 0.29, 0.2), 0.0012, "MetalDark", 4)
+
+    # Flight deck: non-skid pad, markings and a helicopter.
+    m.box(0, 0.41, 0.06, 0.15, 0.15, 0.0012, "Asphalt")
+    m.ring(0, 0.41, 0.0612, 0.0622, 0.045, 0.051, "Marking", 32)
+    m.box(0, 0.41, 0.0612, 0.003, 0.15, 0.001, "Marking")
+    for ex in (-0.073, 0.073):
+        m.box(ex, 0.41, 0.0612, 0.003, 0.15, 0.001, "Marking")
+    helicopter(m, 0, 0.405, 0.0622)
+    m.rod((0, 0.492, 0.06), (0, 0.492, 0.11), 0.0015, "MetalDark", 6)
+    m.box(0, 0.5, 0.098, 0.002, 0.016, 0.011, "TeamColor")
     return m.to_object()
 
 
 def build_missile_silo():
+    """A missile silo, blast doors open and the missile raised, with a
+    service gantry, control bunker, fuel farm, tanker truck, floodlights
+    and a perimeter fence."""
     m = Model("MissileSilo")
-    m.box(0, 0, 0.0, 0.9, 0.9, 0.05, "Concrete", bevel=0.02)
-    # Painted hazard ring round the silo.
-    m.cylinder(0, 0, 0.05, 0.053, 0.32, "Hazard", segments=24)
-    m.cylinder(0, 0, 0.05, 0.055, 0.28, "Concrete", segments=24)
-    # Collar and the open shaft.
-    m.cylinder(0, 0, 0.05, 0.1, 0.24, "ConcreteDark", segments=20, bevel=0.01)
-    m.cylinder(0, 0, 0.1, 0.12, 0.24, "TeamColor", segments=20, bevel=0.006)
-    m.cylinder(0, 0, 0.12, 0.1215, 0.19, "Dark", segments=20)
-    # The missile, nose up out of the shaft.
-    m.cylinder(0, 0, 0.1, 0.21, 0.075, "Missile", segments=12)
-    m.cylinder(0, 0, 0.21, 0.235, 0.075, "TeamColor", segments=12)
-    m.cylinder(0, 0, 0.235, 0.34, 0.075, "Missile", r2=0.0, segments=12)
-    # Blast doors swung open either side of the shaft.
+    pad = 0.05
+    m.box(0, 0, 0.0, 0.9, 0.9, pad, "Concrete", bevel=0.02)
+    for t in (-0.3, 0.3):
+        m.box(t, 0, pad, 0.004, 0.86, 0.0008, "ConcreteDark")
+        m.box(0, t, pad, 0.86, 0.004, 0.0008, "ConcreteDark")
+
+    # Chevron hazard ring, collar, bolts and the open shaft.
+    for i in range(24):
+        m.ring(0, 0, pad, pad + 0.003, 0.27, 0.32,
+               "Hazard" if i % 2 == 0 else "Dark", segments=2,
+               a0=i * 15, a1=(i + 1) * 15)
+    m.cylinder(0, 0, pad, 0.1, 0.24, "ConcreteDark", segments=32, bevel=0.008)
+    m.cylinder(0, 0, 0.1, 0.12, 0.24, "TeamColor", segments=32, bevel=0.004)
+    m.ring(0, 0, 0.12, 0.124, 0.178, 0.2, "MetalDark", 32)
+    m.cylinder(0, 0, 0.11, 0.1215, 0.18, "Dark", segments=32)
+    for i in range(20):
+        a = math.radians(i * 18)
+        m.cylinder(0.218 * math.cos(a), 0.218 * math.sin(a), 0.12, 0.126, 0.004,
+                   "MetalDark", segments=6)
+
+    # The missile, raised out of the shaft.
+    m.cylinder(0, 0, 0.1, 0.25, 0.072, "Missile", segments=24)
+    m.cylinder(0, 0, 0.2, 0.222, 0.0725, "TeamColor", segments=24)
+    for k in range(4):
+        a = 45 + 90 * k
+        r = math.radians(a)
+        m.oriented_box(translate(0.0725 * math.cos(r), 0.0725 * math.sin(r), 0.165)
+                       @ rot_z(a), 0.002, 0.014, 0.05, "Dark")
+    m.cylinder(0, 0, 0.25, 0.254, 0.0735, "MetalDark", segments=24)
+    m.cylinder(0, 0, 0.254, 0.36, 0.072, "Missile", r2=0.006, segments=24)
+    m.cylinder(0, 0, 0.36, 0.368, 0.006, "MetalDark", r2=0.0, segments=8)
+
+    # Blast doors swung open, with ribs, hinges and hydraulic rams.
     for side in (-1, 1):
         hinge = translate(side * 0.21, 0, 0.12) @ rot_y(side * 105)
         m.box(-side * 0.1, 0, 0.0, 0.2, 0.36, 0.03, "TeamColor", bevel=0.008,
               m=hinge)
-        m.box(-side * 0.1, 0, 0.03, 0.04, 0.3, 0.012, "MetalDark", m=hinge)
-    # Control bunker with an antenna and dish.
-    m.box(0.3, 0.31, 0.05, 0.2, 0.14, 0.08, "ConcreteDark", bevel=0.015)
-    m.cylinder(0.36, 0.33, 0.13, 0.26, 0.005, "MetalDark", segments=6)
+        for ry in (-0.12, 0.0, 0.12):
+            m.box(-side * 0.1, ry, 0.03, 0.18, 0.014, 0.008, "MetalDark", m=hinge)
+        m.box(-side * 0.1, 0, 0.03, 0.014, 0.32, 0.008, "MetalDark", m=hinge)
+        m.rod((side * 0.21, -0.17, 0.12), (side * 0.21, 0.17, 0.12), 0.012,
+              "MetalDark", 12)
+        for dy in (-0.11, 0.11):
+            base = Vector((side * 0.31, dy, pad + 0.006))
+            tip = (hinge @ Vector((-side * 0.09, dy, 0.03))).to_3d()
+            mid = base + (tip - base) * 0.55
+            m.box(base.x, base.y, pad, 0.02, 0.02, 0.008, "MetalDark")
+            m.rod(base, mid, 0.008, "MetalDark", 10)
+            m.rod(mid, tip, 0.0045, "MetalLight", 8)
+
+    # Service gantry behind the shaft, with an access arm to the missile.
+    gx, gy, top = 0.0, 0.34, 0.44
+    corners = [(gx - 0.045, gy - 0.045), (gx + 0.045, gy - 0.045),
+               (gx + 0.045, gy + 0.045), (gx - 0.045, gy + 0.045)]
+    for cx, cy in corners:
+        m.beam((cx, cy, pad), (cx, cy, top), 0.008, "Gantry")
+    levels = [pad, 0.16, 0.28, 0.4]
+    for z in levels[1:]:
+        m.box(gx, gy, z, 0.11, 0.11, 0.005, "MetalDark")
+    for (ax, ay), (bx2, by2) in zip(corners, corners[1:] + corners[:1]):
+        for z0, z1 in zip(levels, levels[1:]):
+            m.beam((ax, ay, z0), (bx2, by2, z1), 0.0045, "Gantry")
+            m.beam((bx2, by2, z0), (ax, ay, z1), 0.0045, "Gantry")
+    m.box(0, 0.19, 0.297, 0.022, 0.21, 0.006, "MetalDark")
+    for side in (-1, 1):
+        m.beam((side * 0.011, 0.09, 0.312), (side * 0.011, 0.295, 0.312), 0.002,
+               "Gantry")
+    m.rod((0, 0.085, 0.3), (0, 0.047, 0.29), 0.003, "Dark", 6)
+    m.rod((gx, gy, top), (gx, gy, top + 0.06), 0.002, "MetalDark", 6)
+    m.sphere(gx, gy, top + 0.062, 0.005, "CarRed", subdivisions=1)
+
+    # Control bunker: door, windows, roof plant, antenna and dish.
+    m.box(0.3, 0.31, pad, 0.2, 0.14, 0.08, "ConcreteDark", bevel=0.015)
+    m.box(0.27, 0.239, pad, 0.035, 0.004, 0.055, "MetalDark")
+    m.box(0.345, 0.239, 0.09, 0.05, 0.003, 0.012, "Window")
+    m.box(0.36, 0.35, 0.13, 0.03, 0.03, 0.016, "MetalLight", bevel=0.002)
+    for vx in (0.22, 0.24):
+        m.cylinder(vx, 0.36, 0.13, 0.145, 0.006, "MetalDark", segments=8)
+    m.rod((0.37, 0.28, 0.13), (0.37, 0.28, 0.29), 0.0035, "MetalDark", 6)
+    for z in (0.22, 0.26):
+        m.beam((0.35, 0.28, z), (0.39, 0.28, z), 0.002, "MetalDark")
+    m.cylinder(0.25, 0.3, 0.13, 0.16, 0.008, "MetalDark", segments=8)
     dish = translate(0.25, 0.3, 0.17) @ rot_x(-40)
     m.cylinder(0, 0, -0.012, 0.012, 0.045, "MetalLight", r2=0.012,
-               segments=12, m=dish)
-    m.cylinder(0.25, 0.3, 0.13, 0.16, 0.008, "MetalDark", segments=6)
-    # Fuel tanks lying along the west edge.
+               segments=16, m=dish)
+    feed = (dish @ Vector((0, 0, 0.04))).to_3d()
+    m.rod((0.25, 0.3, 0.17), feed, 0.002, "MetalDark", 4)
+
+    # Fuel farm: two tanks on saddles with team bands, piped to the silo.
     for ty in (0.22, 0.34):
-        tank = translate(-0.3, ty, 0.095) @ rot_y(90)
-        m.cylinder(0, 0, -0.11, 0.11, 0.045, "MetalLight", segments=12,
-                   bevel=0.008, m=tank)
-    # Corner bollards.
-    for bx, by in ((-0.4, -0.4), (0.4, -0.4), (-0.4, 0.4)):
-        m.cylinder(bx, by, 0.05, 0.1, 0.018, "Hazard", segments=8)
+        m.rod((-0.4, ty, 0.095), (-0.18, ty, 0.095), 0.045, "MetalLight", 16)
+        for ex in (-0.4, -0.18):
+            m.sphere(ex, ty, 0.095, 0.045, "MetalLight", subdivisions=2, sx=0.35)
+        m.rod((-0.3, ty, 0.095), (-0.28, ty, 0.095), 0.0465, "TeamColor", 16)
+        for sx_ in (-0.36, -0.22):
+            m.box(sx_, ty, pad, 0.016, 0.07, 0.03, "ConcreteDark")
+        m.rod((-0.2, ty, 0.095), (-0.155, ty, 0.095), 0.006, "MetalDark", 8)
+        m.rod((-0.155, ty, 0.095), (-0.155, ty, pad + 0.007), 0.006, "MetalDark", 8)
+        m.cylinder(-0.168, ty, 0.088, 0.102, 0.009, "CarRed", segments=8)
+    m.rod((-0.155, 0.345, pad + 0.007), (-0.155, 0.16, pad + 0.007), 0.006,
+          "MetalDark", 8)
+
+    # Fuel tanker parked inside the gate.
+    tx, ty = -0.33, -0.22
+    m.box(tx, ty, pad + 0.008, 0.035, 0.125, 0.006, "MetalDark")
+    m.box(tx, ty - 0.05, pad + 0.012, 0.036, 0.032, 0.03, "Olive", bevel=0.003)
+    m.box(tx, ty - 0.0665, pad + 0.03, 0.03, 0.002, 0.01, "Window")
+    m.rod((tx, ty - 0.03, pad + 0.035), (tx, ty + 0.06, pad + 0.035), 0.019,
+          "MetalLight", 16)
+    for wy in (-0.05, 0.02, 0.045):
+        for side in (-1, 1):
+            m.rod((tx + side * 0.012, ty + wy, pad + 0.009),
+                  (tx + side * 0.021, ty + wy, pad + 0.009), 0.009, "Dark", 10)
+
+    # Floodlight masts at the front corners.
+    for lx, rz in ((-0.4, -45), (0.4, 45)):
+        ly = -0.4
+        m.rod((lx, ly, pad), (lx, ly, 0.3), 0.005, "MetalDark", 8)
+        m.box(lx, ly, 0.3, 0.04, 0.012, 0.018, "MetalDark", rz=rz)
+        m.box(lx * 0.985, ly * 0.985, 0.302, 0.034, 0.004, 0.013, "Lamp", rz=rz)
+
+    # Perimeter fence with a gate and guard booth at the front.
+    posts = [-0.43 + i * 0.086 for i in range(11)]
+    sides = [
+        [(p, -0.43) for p in posts], [(0.43, p) for p in posts],
+        [(p, 0.43) for p in posts], [(-0.43, p) for p in posts],
+    ]
+    for k, edge in enumerate(sides):
+        for i, (px, py) in enumerate(edge):
+            if k == 0 and abs(px) < 0.08:
+                continue
+            m.rod((px, py, pad), (px, py, 0.12), 0.0035, "MetalLight", 6)
+            if i + 1 < len(edge):
+                qx, qy = edge[i + 1]
+                if k == 0 and (abs(px) < 0.08 or abs(qx) < 0.08):
+                    continue
+                for h in (0.085, 0.117):
+                    m.beam((px, py, h), (qx, qy, h), 0.0025, "MetalLight")
+    m.box(0.13, -0.39, pad, 0.05, 0.05, 0.06, "Facade", bevel=0.003)
+    m.box(0.13, -0.39, pad + 0.035, 0.052, 0.052, 0.014, "Window")
+    m.box(0.13, -0.39, pad + 0.06, 0.06, 0.06, 0.006, "MetalDark")
+    m.box(0.06, -0.43, pad, 0.008, 0.008, 0.03, "MetalDark")
+    m.box(0.0, -0.43, pad + 0.026, 0.12, 0.005, 0.006, "Hazard")
     return m.to_object()
 
 
@@ -621,6 +915,23 @@ def render_previews(models, out_dir):
     add_camera((0, -5.4, 4.0), (0, 0.05, 0.2), lens=58)
     render(os.path.join(out_dir, "models-closeup.png"))
     clear_preview_objects(keep)
+
+    # One close-up per model.
+    shots = {
+        "city": ((0.9, -1.25, 1.05), (0, 0, 0.22), PREVIEW_TEAMS[0], 0),
+        "warship": ((0.75, -0.95, 0.6), (0, -0.02, 0.08), PREVIEW_TEAMS[1], 25),
+        "missile_silo": ((0.8, -1.1, 0.9), (0, 0, 0.12), PREVIEW_TEAMS[2], 0),
+    }
+    for key, (cam, target, team, rz) in shots.items():
+        if key not in models:
+            continue
+        setup_scene(1400, 1000, samples=64)
+        plane("Ground", "#d8d2c4", 0, 0, 12, 8)
+        tinted_copy(models[key], team, (0, 0, 0.04 if key == "warship" else 0),
+                    rz=rz)
+        add_camera(cam, target, lens=50)
+        render(os.path.join(out_dir, f"model-{key}.png"))
+        clear_preview_objects(keep)
 
     # Map scale: small, many owners, seen through a tilted game camera.
     setup_scene(1600, 900, samples=64)
