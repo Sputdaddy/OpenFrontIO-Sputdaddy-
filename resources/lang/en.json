@@ -2515,6 +2515,8 @@
     "tab_keybinds": "Keybinds",
     "target_player": "Target Player",
     "target_player_desc": "Mark the player whose tile is under your cursor as a target for you and your allies.",
+    "three_renderer_desc": "Draw the map in 3D with Three.js. Experimental: names, units and effects are not shown yet. Takes effect in your next game.",
+    "three_renderer_label": "3D Map (Experimental)",
     "title": "Settings",
     "toggle_terrain": "Toggle Terrain",
     "toggle_view": "Toggle View",

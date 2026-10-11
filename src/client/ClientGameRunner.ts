@@ -86,12 +86,14 @@ import {
   deepAssign,
   GLUnavailableError,
   MapRenderer,
+  type MapView,
   preloadAtlasData,
   renderDpr,
   type RenderSettings,
   showGLGate,
   trackGLInit,
 } from "./render/gl";
+import type { ThreeMapRenderer } from "./render/three/ThreeMapRenderer";
 import { ALL_UNIT_TYPES, UnitState } from "./render/types";
 import { audioMixer, initAudioMixer } from "./sound/AudioMixer";
 import { SoundManager } from "./sound/SoundManager";
@@ -449,8 +451,11 @@ function createWebGLView(
   terrainMap: TerrainMapData,
   config: Config,
   settings: RenderSettings,
+  // The experimental Three.js renderer, when the 3D map setting is on. It is
+  // loaded on demand so the default game client doesn't carry three.js.
+  ThreeRenderer: typeof ThreeMapRenderer | null,
 ): {
-  view: MapRenderer;
+  view: MapView;
   glCanvas: HTMLCanvasElement;
   cachedWebGLFrameCallback: { current: FrameRequestCallback | null };
 } {
@@ -500,9 +505,9 @@ function createWebGLView(
   // users on software/missing WebGL2. MapRenderer constructs the GL context;
   // a non-accelerated context throws GLUnavailableError (handled by the
   // game-start catch, which shows the gate).
-  let view: MapRenderer;
+  let view: MapView;
   try {
-    view = new MapRenderer(
+    view = new (ThreeRenderer ?? MapRenderer)(
       glCanvas,
       {
         mapWidth,
@@ -551,7 +556,7 @@ function createWebGLView(
 
 function mountWebGLFrameLoop(
   terrainMap: TerrainMapData,
-  view: MapRenderer,
+  view: MapView,
   glCanvas: HTMLCanvasElement,
   cachedWebGLFrameCallback: { current: FrameRequestCallback | null },
   transformHandler: import("./TransformHandler").TransformHandler,
@@ -745,10 +750,14 @@ async function createClientGame(
       return settings;
     };
 
+    const ThreeRenderer = userSettings.threeRenderer()
+      ? (await import("./render/three/ThreeMapRenderer")).ThreeMapRenderer
+      : null;
     const { view, glCanvas, cachedWebGLFrameCallback } = createWebGLView(
       gameMap,
       config,
       resolveRenderSettings(),
+      ThreeRenderer,
     );
 
     const graphicsListenerAbort = new AbortController();

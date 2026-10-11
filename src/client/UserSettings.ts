@@ -412,6 +412,11 @@ export class UserSettings {
     return this.getBool("settings.anonymousNames", false);
   }
 
+  /** Draw the map with the experimental Three.js 3D renderer. */
+  threeRenderer() {
+    return this.getBool("settings.threeRenderer", false);
+  }
+
   lobbyIdVisibility() {
     return this.getBool("settings.lobbyIdVisibility", true);
   }
@@ -512,6 +517,10 @@ export class UserSettings {
 
   setTutorialDismissed(value: boolean) {
     this.setBool("settings.tutorialDismissed", value);
+  }
+
+  toggleThreeRenderer() {
+    this.setBool("settings.threeRenderer", !this.threeRenderer());
   }
 
   toggleRandomName() {

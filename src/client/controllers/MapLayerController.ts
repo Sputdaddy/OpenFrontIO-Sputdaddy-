@@ -11,12 +11,12 @@ import { MapLayer } from "@openfront/engine-api/game/MapFiles";
 import { TerrainMapData } from "@openfront/engine-lib/game/TerrainMapLoader";
 import { GameMapLoader } from "@openfront/shared/GameMapLoader";
 import { Controller } from "../Controller";
-import { MapRenderer } from "../render/gl";
+import type { MapView } from "../render/gl";
 import { UserSettings } from "../UserSettings";
 
 export class MapLayerController implements Controller {
   constructor(
-    private readonly view: MapRenderer,
+    private readonly view: MapView,
     private readonly gameMap: TerrainMapData,
     private readonly userSettings: UserSettings,
     private readonly gameMapType: GameMapType,
