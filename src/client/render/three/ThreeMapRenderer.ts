@@ -30,7 +30,6 @@ import type { SpawnCenter } from "../gl/passes/SpawnOverlayPass";
 import type { AttackTroopLabel } from "../gl/passes/WorldTextPass";
 import type { RenderSettings } from "../gl/RenderSettings";
 import {
-  buildTerrainRGBA,
   getPaletteSize,
   hexToRgb,
   type TerrainColorOverrides,
@@ -52,6 +51,7 @@ import type {
   TerrainRect,
   UnitState,
 } from "../types";
+import { buildCoastTextures } from "./CoastTextures";
 import { type SurfaceElevation, TILT_DEGREES, TILT_SHIFT } from "./Elevation";
 import {
   buildHeightGrid,
@@ -90,7 +90,10 @@ export class ThreeMapRenderer implements MapView {
   private readonly rowDirty: Uint8Array;
   private readonly paletteData: Float32Array;
   private readonly paletteTex: THREE.DataTexture;
+  // Land colours, water colours and the land mask (see CoastTextures).
   private readonly terrainTex: THREE.DataTexture;
+  private readonly waterTex: THREE.DataTexture;
+  private readonly landMaskTex: THREE.DataTexture;
   private readonly terrainMat: THREE.MeshStandardMaterial;
   private readonly sun = new THREE.DirectionalLight(0xfff2de, 2.4);
   private readonly surface: SurfaceHeights;
@@ -102,6 +105,8 @@ export class ThreeMapRenderer implements MapView {
     uPalette: { value: null as THREE.Texture | null },
     uMapSize: { value: new THREE.Vector2() },
     uHighlight: { value: 0 },
+    uWater: { value: null as THREE.Texture | null },
+    uLand: { value: null as THREE.Texture | null },
   };
 
   private resizeObs: ResizeObserver | null = null;
@@ -168,22 +173,35 @@ export class ThreeMapRenderer implements MapView {
     this.paletteTex.needsUpdate = true;
 
     const terrainBytes = terrainSource();
-    this.terrainTex = this.dataTexture(
-      buildTerrainRGBA(
-        terrainBytes,
-        this.mapW,
-        this.mapH,
-        this.terrainColors(),
-      ),
+    const coast = buildCoastTextures(
+      terrainBytes,
       this.mapW,
       this.mapH,
+      this.terrainColors(),
+    );
+    // Filtered, so colours blend smoothly up close instead of showing tiles.
+    const smooth = (tex: THREE.DataTexture) => {
+      tex.magFilter = THREE.LinearFilter;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.generateMipmaps = true;
+      tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+      return tex;
+    };
+    this.terrainTex = smooth(
+      this.dataTexture(coast.land, this.mapW, this.mapH),
     );
     this.terrainTex.colorSpace = THREE.SRGBColorSpace;
-    // Crisp tile edges up close, like the WebGL2 renderer.
-    this.terrainTex.magFilter = THREE.NearestFilter;
-    this.terrainTex.minFilter = THREE.LinearMipmapLinearFilter;
-    this.terrainTex.generateMipmaps = true;
-    this.terrainTex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+    this.waterTex = smooth(this.dataTexture(coast.water, this.mapW, this.mapH));
+    this.waterTex.colorSpace = THREE.SRGBColorSpace;
+    this.landMaskTex = new THREE.DataTexture(
+      coast.mask,
+      this.mapW,
+      this.mapH,
+      THREE.RedFormat,
+    );
+    this.landMaskTex.unpackAlignment = 1;
+    this.landMaskTex.needsUpdate = true;
+    smooth(this.landMaskTex);
 
     const normalTex = this.dataTexture(
       buildReliefNormals(terrainBytes, this.mapW, this.mapH),
@@ -197,6 +215,8 @@ export class ThreeMapRenderer implements MapView {
     this.uniforms.uOwner.value = this.ownerTex;
     this.uniforms.uPalette.value = this.paletteTex;
     this.uniforms.uMapSize.value.set(this.mapW, this.mapH);
+    this.uniforms.uWater.value = this.waterTex;
+    this.uniforms.uLand.value = this.landMaskTex;
 
     this.terrainMat = new THREE.MeshStandardMaterial({
       map: this.terrainTex,
@@ -235,6 +255,8 @@ export class ThreeMapRenderer implements MapView {
           uniform sampler2D uPalette;
           uniform vec2 uMapSize;
           uniform float uHighlight;
+          uniform sampler2D uWater;
+          uniform sampler2D uLand;
           uvec2 tileAt(ivec2 t) {
             t = clamp(t, ivec2(0), ivec2(uMapSize) - 1);
             vec4 o = texelFetch(uOwner, t, 0);
@@ -247,25 +269,52 @@ export class ThreeMapRenderer implements MapView {
           "#include <map_fragment>",
           `#include <map_fragment>
           {
-            ivec2 t = ivec2(floor(vMapUv * uMapSize));
-            uvec2 s = tileAt(t);
-            uint own = s.x;
+            // Coast: land colours where the filtered land mask is above one
+            // half, water colours below, antialiased across the contour.
+            float landCov = texture(uLand, vMapUv).r;
+            float aa = max(fwidth(landCov), 1e-3);
+            float landMix = smoothstep(0.5 - aa, 0.5 + aa, landCov);
+            diffuseColor.rgb = mix(texture(uWater, vMapUv).rgb, diffuseColor.rgb, landMix);
+
+            // Territory: the owner with the most bilinear weight among the
+            // four nearest tiles, so borders cut tile corners instead of
+            // stepping. That weight falls to one half at the border line,
+            // which is drawn as a band just inside it.
+            vec2 tp = vMapUv * uMapSize - 0.5;
+            ivec2 t0 = ivec2(floor(tp));
+            vec2 f = tp - vec2(t0);
+            uint o[4] = uint[4](
+              tileAt(t0).x, tileAt(t0 + ivec2(1, 0)).x,
+              tileAt(t0 + ivec2(0, 1)).x, tileAt(t0 + ivec2(1, 1)).x);
+            float w[4] = float[4](
+              (1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y),
+              (1.0 - f.x) * f.y, f.x * f.y);
+            uint own = o[0];
+            float cov = -1.0;
+            for (int i = 0; i < 4; i++) {
+              float c = 0.0;
+              for (int j = 0; j < 4; j++) c += o[j] == o[i] ? w[j] : 0.0;
+              if (c > cov) {
+                cov = c;
+                own = o[i];
+              }
+            }
+            uvec2 s = tileAt(ivec2(floor(vMapUv * uMapSize)));
             if ((s.y & 32u) != 0u) {
               diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.09, 0.13, 0.03), 0.6);
             }
             if (own != 0u) {
-              bool border =
-                tileAt(t + ivec2(1, 0)).x != own || tileAt(t - ivec2(1, 0)).x != own ||
-                tileAt(t + ivec2(0, 1)).x != own || tileAt(t - ivec2(0, 1)).x != own;
               vec4 fill = texelFetch(uPalette, ivec2(int(own), 0), 0);
               vec4 edge = texelFetch(uPalette, ivec2(int(own), 1), 0);
               float hl = float(own) == uHighlight ? 1.0 : 0.0;
-              if (border) {
-                diffuseColor.rgb = pow(edge.rgb, vec3(2.2));
-              } else {
-                float a = clamp(fill.a + hl * 0.2, 0.0, 1.0);
-                diffuseColor.rgb = mix(diffuseColor.rgb, pow(fill.rgb, vec3(2.2)), a);
-              }
+              float a = clamp(fill.a + hl * 0.2, 0.0, 1.0);
+              vec3 filled = mix(diffuseColor.rgb, pow(fill.rgb, vec3(2.2)), a);
+              // Border band: at least a couple of pixels when zoomed out.
+              float tilesPerPixel = max(fwidth(tp.x), fwidth(tp.y));
+              float band = clamp(2.0 * tilesPerPixel, 0.3, 0.5);
+              float soft = max(fwidth(cov), 1e-3);
+              float border = 1.0 - smoothstep(0.5 + band - soft, 0.5 + band + soft, cov);
+              diffuseColor.rgb = mix(filled, pow(edge.rgb, vec3(2.2)), border);
             }
           }`,
         );
@@ -519,16 +568,21 @@ export class ThreeMapRenderer implements MapView {
   }
 
   rebuildTerrain(): void {
-    const img = this.terrainTex.image as { data: Uint8Array };
-    img.data.set(
-      buildTerrainRGBA(
-        this.terrainSource(),
-        this.mapW,
-        this.mapH,
-        this.terrainColors(),
-      ),
+    const coast = buildCoastTextures(
+      this.terrainSource(),
+      this.mapW,
+      this.mapH,
+      this.terrainColors(),
     );
-    this.terrainTex.needsUpdate = true;
+    const textures: [THREE.DataTexture, Uint8Array][] = [
+      [this.terrainTex, coast.land],
+      [this.waterTex, coast.water],
+      [this.landMaskTex, coast.mask],
+    ];
+    for (const [tex, data] of textures) {
+      (tex.image as { data: Uint8Array }).data.set(data);
+      tex.needsUpdate = true;
+    }
   }
 
   getSettings(): RenderSettings {
@@ -609,6 +663,8 @@ export class ThreeMapRenderer implements MapView {
     this.ownerTex.dispose();
     this.paletteTex.dispose();
     this.terrainTex.dispose();
+    this.waterTex.dispose();
+    this.landMaskTex.dispose();
     this.terrainMat.normalMap?.dispose();
     this.renderer.dispose();
   }
