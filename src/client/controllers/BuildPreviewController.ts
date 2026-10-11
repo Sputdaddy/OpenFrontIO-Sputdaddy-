@@ -26,7 +26,7 @@ import {
   MouseMoveEvent,
   MouseUpEvent,
 } from "../InputHandler";
-import { buildNukeTrajectory, MapRenderer } from "../render/gl";
+import { buildNukeTrajectory, type MapView } from "../render/gl";
 import type { SAMInfo } from "../render/gl/utils/NukeTrajectory";
 import type { GhostPreviewData } from "../render/types";
 import { TransformHandler } from "../TransformHandler";
@@ -101,7 +101,7 @@ export class BuildPreviewController implements Controller {
     private eventBus: EventBus,
     public uiState: UIState,
     private transformHandler: TransformHandler,
-    private view: MapRenderer,
+    private view: MapView,
     private userSettings: UserSettings,
   ) {}
 

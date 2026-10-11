@@ -417,6 +417,10 @@ export class UserSettingModal extends BaseModal {
     );
   }
 
+  private toggleThreeRenderer() {
+    this.userSettings.toggleThreeRenderer();
+  }
+
   private toggleLobbyIdVisibility() {
     this.userSettings.toggleLobbyIdVisibility();
     console.log(
@@ -1743,6 +1747,15 @@ export class UserSettingModal extends BaseModal {
         id="left-click-toggle"
         .checked=${this.userSettings.leftClickOpensMenu()}
         @change=${this.toggleLeftClickOpensMenu}
+      ></setting-toggle>
+
+      <!-- 🗺️ 3D Map (experimental Three.js renderer) -->
+      <setting-toggle
+        label="${translateText("user_setting.three_renderer_label")}"
+        description="${translateText("user_setting.three_renderer_desc")}"
+        id="three-renderer-toggle"
+        .checked=${this.userSettings.threeRenderer()}
+        @change=${this.toggleThreeRenderer}
       ></setting-toggle>
 
       <!-- 🙈 Anonymous Names -->
