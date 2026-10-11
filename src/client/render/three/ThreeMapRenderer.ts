@@ -14,8 +14,8 @@
  * it; raised ground is drawn further up the screen, and TransformHandler
  * corrects for that through `elevation` (see Elevation.ts).
  *
- * Cities, missile silos and warships are drawn as 3D models (UnitModels).
- * Not drawn yet: other units and structures, names, trails, railroads and
+ * Units and structures are drawn as 3D models (UnitModels), and railroads
+ * are drawn into the terrain. Not drawn yet: names, trails, explosions and
  * the other effect passes. Their setters are accepted and ignored so the
  * client can push data to this renderer exactly as it does to MapRenderer.
  */
@@ -64,6 +64,8 @@ const PALETTE_SIZE = getPaletteSize();
 const TILT = (TILT_DEGREES * Math.PI) / 180;
 // Camera distance from the point it looks at, beyond what the view needs.
 const CAMERA_MARGIN = 200;
+/** Terrain byte bit set on land tiles. */
+const LAND_BIT = 0x80;
 // Direction the sunlight comes from (normalized below): low from the
 // north-west, so relief reads the way a printed relief map does.
 const SUN_DIR = new THREE.Vector3(-0.55, 0.65, -0.4).normalize();
@@ -94,6 +96,9 @@ export class ThreeMapRenderer implements MapView {
   private readonly terrainTex: THREE.DataTexture;
   private readonly waterTex: THREE.DataTexture;
   private readonly landMaskTex: THREE.DataTexture;
+  /** Rail type per tile, 0 for none (as RailroadPass reads it). */
+  private readonly railData: Uint8Array;
+  private readonly railTex: THREE.DataTexture;
   private readonly terrainMat: THREE.MeshStandardMaterial;
   private readonly sun = new THREE.DirectionalLight(0xfff2de, 2.4);
   private readonly surface: SurfaceHeights;
@@ -107,6 +112,7 @@ export class ThreeMapRenderer implements MapView {
     uHighlight: { value: 0 },
     uWater: { value: null as THREE.Texture | null },
     uLand: { value: null as THREE.Texture | null },
+    uRail: { value: null as THREE.Texture | null },
   };
 
   private resizeObs: ResizeObserver | null = null;
@@ -202,6 +208,15 @@ export class ThreeMapRenderer implements MapView {
     this.landMaskTex.unpackAlignment = 1;
     this.landMaskTex.needsUpdate = true;
     smooth(this.landMaskTex);
+    this.railData = new Uint8Array(n);
+    this.railTex = new THREE.DataTexture(
+      this.railData,
+      this.mapW,
+      this.mapH,
+      THREE.RedFormat,
+    );
+    this.railTex.unpackAlignment = 1;
+    this.railTex.needsUpdate = true;
 
     const normalTex = this.dataTexture(
       buildReliefNormals(terrainBytes, this.mapW, this.mapH),
@@ -217,6 +232,7 @@ export class ThreeMapRenderer implements MapView {
     this.uniforms.uMapSize.value.set(this.mapW, this.mapH);
     this.uniforms.uWater.value = this.waterTex;
     this.uniforms.uLand.value = this.landMaskTex;
+    this.uniforms.uRail.value = this.railTex;
 
     this.terrainMat = new THREE.MeshStandardMaterial({
       map: this.terrainTex,
@@ -257,6 +273,30 @@ export class ThreeMapRenderer implements MapView {
           uniform float uHighlight;
           uniform sampler2D uWater;
           uniform sampler2D uLand;
+          uniform sampler2D uRail;
+          float segmentDistance(vec2 p, vec2 a, vec2 b, out float along) {
+            vec2 ab = b - a;
+            float t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
+            along = dot(a + ab * t, abs(normalize(ab)));
+            return length(p - a - ab * t);
+          }
+          // Distance from p (in the tile) to a rail's centreline: straight
+          // across (1 vertical, 2 horizontal) or a corner joining the top or
+          // bottom edge to the left or right one (3-6). along runs along
+          // the track, for the sleepers.
+          float railDistance(uint rail, vec2 p, out float along) {
+            if (rail == 1u) return segmentDistance(p, vec2(0.5, 0.0), vec2(0.5, 1.0), along);
+            if (rail == 2u) return segmentDistance(p, vec2(0.0, 0.5), vec2(1.0, 0.5), along);
+            vec2 c = vec2(0.5);
+            vec2 e1 = vec2(0.5, (rail == 3u || rail == 4u) ? 0.0 : 1.0);
+            vec2 e2 = vec2((rail == 3u || rail == 5u) ? 0.0 : 1.0, 0.5);
+            float a1;
+            float a2;
+            float d1 = segmentDistance(p, c, e1, a1);
+            float d2 = segmentDistance(p, c, e2, a2);
+            along = d1 < d2 ? a1 : a2;
+            return min(d1, d2);
+          }
           uvec2 tileAt(ivec2 t) {
             t = clamp(t, ivec2(0), ivec2(uMapSize) - 1);
             vec4 o = texelFetch(uOwner, t, 0);
@@ -316,6 +356,27 @@ export class ThreeMapRenderer implements MapView {
               float border = 1.0 - smoothstep(0.5 + band - soft, 0.5 + band + soft, cov);
               diffuseColor.rgb = mix(filled, pow(edge.rgb, vec3(2.2)), border);
             }
+
+            // Railroads: ballast, sleepers and two steel rails up close; a
+            // plain dark line once a tile is only a few pixels across.
+            ivec2 rt = ivec2(floor(vMapUv * uMapSize));
+            uint rail = uint(texelFetch(uRail, rt, 0).r * 255.0 + 0.5);
+            if (rail != 0u && rail <= 6u) {
+              float along;
+              float d = railDistance(rail, vMapUv * uMapSize - vec2(rt), along);
+              float px = max(fwidth(tp.x), fwidth(tp.y));
+              float detail = 1.0 - smoothstep(0.1, 0.25, px);
+              vec3 c = diffuseColor.rgb;
+              float ballast = 1.0 - smoothstep(0.3 - px, 0.3 + px, d);
+              c = mix(c, vec3(0.25, 0.23, 0.2), ballast * detail);
+              float ties = step(fract(along * 4.0), 0.4)
+                * (1.0 - smoothstep(0.24 - px, 0.24 + px, d));
+              c = mix(c, vec3(0.07, 0.05, 0.04), ties * detail);
+              float steel = 1.0 - smoothstep(0.025, 0.025 + px, abs(d - 0.13));
+              c = mix(c, vec3(0.33, 0.35, 0.38), steel * detail);
+              float line = 1.0 - smoothstep(0.2 - px, 0.2 + px, d);
+              diffuseColor.rgb = mix(c, vec3(0.04), line * (1.0 - detail));
+            }
           }`,
         );
     };
@@ -365,6 +426,14 @@ export class ThreeMapRenderer implements MapView {
       this.mapW,
       config.msPerTick(),
       (ownerID, out) => this.ownerColor(ownerID, out),
+      (x, y) => {
+        const tx = Math.floor(x);
+        const ty = Math.floor(y);
+        if (tx < 0 || ty < 0 || tx >= this.mapW || ty >= this.mapH) {
+          return false;
+        }
+        return (terrainBytes[ty * this.mapW + tx] & LAND_BIT) === 0;
+      },
     );
 
     const rect = canvas.getBoundingClientRect();
@@ -595,6 +664,12 @@ export class ThreeMapRenderer implements MapView {
     this.units.update(units);
   }
 
+  uploadRailroadState(data: Uint8Array): void {
+    if (data.length !== this.railData.length) return;
+    this.railData.set(data);
+    this.railTex.needsUpdate = true;
+  }
+
   // ---- MapView: not drawn yet ----
 
   uploadLiveTrailDelta(
@@ -607,7 +682,6 @@ export class ThreeMapRenderer implements MapView {
   setPlayerSkin(_smallID: number, _url: string | null): void {}
   initSkinAtlas(_urls: readonly string[]): void {}
   setPlayerSpawn(_smallID: number, _x: number, _y: number): void {}
-  uploadRailroadState(_data: Uint8Array): void {}
   updateNames(
     _names: Map<string, NameEntry>,
     _players: Map<number, PlayerState>,
@@ -665,6 +739,7 @@ export class ThreeMapRenderer implements MapView {
     this.terrainTex.dispose();
     this.waterTex.dispose();
     this.landMaskTex.dispose();
+    this.railTex.dispose();
     this.terrainMat.normalMap?.dispose();
     this.renderer.dispose();
   }
