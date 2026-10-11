@@ -38,21 +38,32 @@ from mathutils import Matrix, Vector
 # ---------------------------------------------------------------------------
 # Materials
 
+# name: (colour, roughness, metallic)
 PALETTE = {
-    "TeamColor": "#ffffff",
-    "TeamDeck": "#d4d4d4",
-    "Wall": "#e6dac0",
-    "Stone": "#9e9586",
-    "Paving": "#bdb3a1",
-    "Foliage": "#5d8a43",
-    "MetalLight": "#c4c9cd",
-    "MetalDark": "#5c636b",
-    "Deck": "#8e949a",
-    "Concrete": "#b5afa5",
-    "ConcreteDark": "#8b867e",
-    "Hazard": "#e8b52c",
-    "Dark": "#262b31",
-    "Missile": "#ebebe7",
+    "TeamColor": ("#ffffff", 0.7, 0.0),
+    "TeamDeck": ("#d4d4d4", 0.75, 0.0),
+    "TeamGlass": ("#a4a4a4", 0.25, 0.35),
+    "Facade": ("#dcdad4", 0.8, 0.0),
+    "FacadeWarm": ("#c9b9a3", 0.85, 0.0),
+    "Window": ("#2f3d4b", 0.25, 0.2),
+    "Asphalt": ("#4a4f56", 0.9, 0.0),
+    "Sidewalk": ("#c7c3ba", 0.9, 0.0),
+    "Marking": ("#efeee8", 0.8, 0.0),
+    "Grass": ("#76a352", 0.95, 0.0),
+    "Water": ("#4f8fbf", 0.15, 0.0),
+    "Foliage": ("#4f8a3c", 0.9, 0.0),
+    "Trunk": ("#6b5544", 0.9, 0.0),
+    "MetalLight": ("#c4c9cd", 0.5, 0.3),
+    "MetalDark": ("#5c636b", 0.55, 0.3),
+    "Concrete": ("#b5afa5", 0.9, 0.0),
+    "ConcreteDark": ("#8b867e", 0.9, 0.0),
+    "Hazard": ("#e8b52c", 0.7, 0.0),
+    "Dark": ("#262b31", 0.6, 0.0),
+    "Missile": ("#ebebe7", 0.5, 0.0),
+    "CarRed": ("#c23b32", 0.4, 0.2),
+    "CarWhite": ("#e9eaec", 0.4, 0.2),
+    "CarYellow": ("#e6b422", 0.4, 0.2),
+    "CarBlue": ("#2f4f7f", 0.4, 0.2),
 }
 
 
@@ -65,13 +76,13 @@ def hex_to_linear(hexstr):
     return tuple(srgb_to_linear(int(h[i : i + 2], 16) / 255) for i in (0, 2, 4))
 
 
-def make_material(name, hexstr, roughness=0.8):
+def make_material(name, hexstr, roughness=0.8, metallic=0.0):
     mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     mat.use_nodes = True
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     bsdf.inputs["Base Color"].default_value = (*hex_to_linear(hexstr), 1.0)
     bsdf.inputs["Roughness"].default_value = roughness
-    bsdf.inputs["Metallic"].default_value = 0.0
+    bsdf.inputs["Metallic"].default_value = metallic
     mat.diffuse_color = (*hex_to_linear(hexstr), 1.0)
     return mat
 
@@ -209,6 +220,13 @@ class Model:
         self.cylinder(x, y, z0, z0 + height, r, material, r2=0.0, segments=4,
                       rz=45 + rz)
 
+    def sphere(self, x, y, z, r, material, subdivisions=1, sz=1.0):
+        matrix = translate(x, y, z) @ scale(1.0, 1.0, sz)
+        verts = bmesh.ops.create_icosphere(
+            self.bm, subdivisions=subdivisions, radius=r, matrix=matrix
+        )["verts"]
+        self._finish(verts, material, 0.0)
+
     def to_object(self):
         bmesh.ops.recalc_face_normals(self.bm, faces=self.bm.faces)
         mesh = bpy.data.meshes.new(self.name)
@@ -227,49 +245,135 @@ class Model:
 # Models
 
 
-def house(m, x, y, rz, length, depth, wall_h, roof_h):
-    m.box(x, y, 0.04, length, depth, wall_h, "Wall", rz=rz, bevel=0.006)
-    m.gable_roof(x, y, 0.04 + wall_h, length + 0.025, depth + 0.03, roof_h,
-                 "TeamColor", rz=rz, bevel=0.004)
+def banded_block(m, x, y, z0, sx, sy, floors, floor_h, wall):
+    """Mid-rise with ribbon windows, a parapet and a team-colour roof.
+    Returns the roof height."""
+    z = z0
+    for _ in range(floors):
+        m.box(x, y, z, sx, sy, floor_h * 0.45, wall)
+        m.box(x, y, z + floor_h * 0.45, sx - 0.008, sy - 0.008, floor_h * 0.55,
+              "Window")
+        z += floor_h
+    m.box(x, y, z, sx, sy, floor_h * 0.5, wall)
+    z += floor_h * 0.5
+    m.box(x, y, z, sx - 0.014, sy - 0.014, 0.004, "TeamColor")
+    return z + 0.004
+
+
+def glass_tower(m, x, y, z0, sx, sy, h, floor_h):
+    """Curtain-wall tower: team-tinted glass with floor slabs and corner
+    mullions. Returns the roof height."""
+    m.box(x, y, z0, sx - 0.008, sy - 0.008, h, "TeamGlass")
+    z = z0
+    while z < z0 + h - 1e-6:
+        m.box(x, y, z, sx, sy, 0.006, "Facade")
+        z += floor_h
+    for cx in (-1, 1):
+        for cy in (-1, 1):
+            m.box(x + cx * (sx / 2 - 0.006), y + cy * (sy / 2 - 0.006), z0,
+                  0.012, 0.012, h, "Facade")
+    m.box(x, y, z0 + h, sx + 0.004, sy + 0.004, 0.014, "Facade")
+    return z0 + h + 0.014
+
+
+def round_tower(m, x, y, z0, r, h, floor_h):
+    m.cylinder(x, y, z0, z0 + h, r - 0.005, "TeamGlass", segments=24)
+    z = z0
+    while z < z0 + h - 1e-6:
+        m.cylinder(x, y, z, z + 0.006, r, "Facade", segments=24)
+        z += floor_h
+    m.cylinder(x, y, z0 + h, z0 + h + 0.016, r + 0.003, "Facade", segments=24)
+    return z0 + h + 0.016
+
+
+def rooftop_units(m, x, y, z, units):
+    for dx, dy, sx, sy, sz in units:
+        m.box(x + dx, y + dy, z, sx, sy, sz, "MetalLight", bevel=0.002)
+
+
+def tree(m, x, y, z, size=1.0):
+    m.cylinder(x, y, z, z + 0.03 * size, 0.007 * size, "Trunk", segments=6)
+    m.sphere(x, y, z + 0.05 * size, 0.034 * size, "Foliage", sz=1.15)
+
+
+def car(m, x, y, z, rz, paint):
+    m.box(x, y, z + 0.003, 0.042, 0.02, 0.011, paint, rz=rz, bevel=0.003)
+    m.box(x, y, z + 0.014, 0.022, 0.017, 0.008, "Window", rz=rz, bevel=0.002)
 
 
 def build_city():
+    """A modern city block: four blocks round a crossroads with an office
+    skyscraper, a round glass tower, offices, apartments and a park."""
     m = Model("City")
-    # Octagonal stone plinth with a paved top.
-    m.cylinder(0, 0, 0.0, 0.03, 0.5, "Stone", segments=8, rz=22.5, bevel=0.01)
-    m.cylinder(0, 0, 0.03, 0.04, 0.47, "Paving", segments=8, rz=22.5)
+    road = 0.025
+    top = road + 0.012  # sidewalk level
 
-    # Keep: square hall with a tall pyramid roof.
-    m.box(-0.03, 0.0, 0.04, 0.2, 0.2, 0.3, "Wall", bevel=0.008)
-    m.box(-0.03, 0.0, 0.34, 0.215, 0.215, 0.025, "Stone", bevel=0.005)
-    m.pyramid_roof(-0.03, 0.0, 0.365, 0.23, 0.22, "TeamColor")
+    # Streets: asphalt base, four raised blocks, markings.
+    m.box(0, 0, 0, 0.98, 0.98, road, "Asphalt", bevel=0.008)
+    for bx in (-1, 1):
+        for by in (-1, 1):
+            m.box(bx * 0.235, by * 0.235, road, 0.4, 0.4, 0.012, "Sidewalk",
+                  bevel=0.004)
+    for i in range(-6, 7):
+        t = i * 0.075
+        if abs(t) < 0.06:
+            continue  # keep the junction clear
+        m.box(t, 0, road, 0.035, 0.005, 0.0015, "Marking")
+        m.box(0, t, road, 0.005, 0.035, 0.0015, "Marking")
+    for k in range(-2, 3):
+        for side in (-1, 1):
+            m.box(side * 0.052, k * 0.013, road, 0.022, 0.006, 0.0015, "Marking")
+            m.box(k * 0.013, side * 0.052, road, 0.006, 0.022, 0.0015, "Marking")
 
-    # Round tower with a cone roof.
-    m.cylinder(0.15, 0.17, 0.04, 0.46, 0.062, "Wall", segments=10, bevel=0.006)
-    m.cylinder(0.15, 0.17, 0.46, 0.48, 0.072, "Stone", segments=10)
-    m.cylinder(0.15, 0.17, 0.48, 0.66, 0.08, "TeamColor", r2=0.0, segments=10)
+    # North-east: the skyscraper on a two-storey podium, with a spire.
+    z = banded_block(m, 0.235, 0.235, top, 0.34, 0.34, 2, 0.032, "Facade")
+    z = glass_tower(m, 0.25, 0.25, z, 0.2, 0.2, 0.42, 0.04)
+    z = glass_tower(m, 0.25, 0.25, z, 0.14, 0.14, 0.1, 0.04)
+    m.box(0.25, 0.25, z, 0.1, 0.1, 0.03, "TeamColor", bevel=0.004)
+    m.cylinder(0.25, 0.25, z + 0.03, z + 0.17, 0.006, "MetalLight",
+               r2=0.002, segments=8)
+    rooftop_units(m, 0.235, 0.235, top + 0.0755, [
+        (-0.12, -0.12, 0.04, 0.03, 0.02), (0.12, -0.13, 0.03, 0.03, 0.018),
+    ])
 
-    # Ring of houses facing the keep.
-    houses = [
-        # angle, length, depth, wall height, roof height
-        (100, 0.15, 0.1, 0.1, 0.07),
-        (145, 0.17, 0.11, 0.12, 0.08),
-        (190, 0.14, 0.1, 0.09, 0.07),
-        (235, 0.16, 0.1, 0.11, 0.07),
-        (280, 0.15, 0.11, 0.1, 0.08),
-        (325, 0.17, 0.1, 0.12, 0.07),
-        (10, 0.14, 0.1, 0.1, 0.07),
-    ]
-    for angle, length, depth, wall_h, roof_h in houses:
-        a = math.radians(angle)
-        x, y = 0.31 * math.cos(a), 0.31 * math.sin(a)
-        house(m, x, y, angle + 90, length, depth, wall_h, roof_h)
+    # North-west: round glass tower and an office slab.
+    z = round_tower(m, -0.3, 0.3, top, 0.085, 0.4, 0.035)
+    m.cylinder(-0.3, 0.3, z, z + 0.01, 0.07, "TeamColor", segments=24)
+    m.cylinder(-0.3, 0.3, z + 0.01, z + 0.03, 0.025, "MetalLight", segments=12)
+    z = banded_block(m, -0.14, 0.235, top, 0.12, 0.34, 7, 0.04, "Facade")
+    rooftop_units(m, -0.14, 0.235, z, [
+        (0, 0.08, 0.06, 0.05, 0.025), (0, -0.07, 0.05, 0.04, 0.018),
+    ])
 
-    # A few trees on the edge of the plinth.
-    for angle in (55, 212, 302):
-        a = math.radians(angle)
-        x, y = 0.4 * math.cos(a), 0.4 * math.sin(a)
-        m.cylinder(x, y, 0.04, 0.17, 0.045, "Foliage", r2=0.0, segments=7)
+    # South-west: apartment blocks round a small courtyard.
+    z = banded_block(m, -0.235, -0.15, top, 0.34, 0.1, 5, 0.036, "FacadeWarm")
+    rooftop_units(m, -0.235, -0.15, z, [
+        (-0.1, 0, 0.03, 0.03, 0.016), (0.02, 0, 0.03, 0.03, 0.016),
+        (0.12, 0.01, 0.04, 0.025, 0.02),
+    ])
+    z = banded_block(m, -0.235, -0.33, top, 0.34, 0.08, 3, 0.036, "FacadeWarm")
+    rooftop_units(m, -0.235, -0.33, z, [(-0.08, 0, 0.03, 0.03, 0.015)])
+    for tx in (-0.36, -0.235, -0.11):
+        tree(m, tx, -0.245, top, 0.7)
+
+    # South-east: low offices backing onto a park with a pond.
+    z = banded_block(m, 0.235, -0.11, top, 0.3, 0.1, 2, 0.036, "Facade")
+    rooftop_units(m, 0.235, -0.11, z, [(0.08, 0, 0.04, 0.04, 0.02)])
+    m.box(0.235, -0.3, top, 0.36, 0.25, 0.003, "Grass")
+    m.cylinder(0.29, -0.3, top, top + 0.0045, 0.06, "Water", segments=20,
+               sx=1.4)
+    for tx, ty in ((0.12, -0.22), (0.12, -0.37), (0.38, -0.21), (0.39, -0.39),
+                   (0.22, -0.4), (0.3, -0.2), (0.175, -0.3)):
+        tree(m, tx, ty, top + 0.003)
+
+    # Traffic.
+    for x, y, rz, paint in (
+        (-0.33, -0.017, 0, "CarRed"), (0.15, 0.017, 180, "CarWhite"),
+        (0.38, -0.017, 0, "CarYellow"), (0.017, -0.3, 90, "CarBlue"),
+        (-0.017, 0.2, 270, "CarWhite"), (-0.4625, 0.1, 90, "CarYellow"),
+        (0.2, 0.4625, 180, "CarBlue"),
+    ):
+        car(m, x, y, road, rz, paint)
     return m.to_object()
 
 
@@ -418,8 +522,9 @@ def tinted_copy(obj, team_hex, location, rz=0.0, s=1.0):
         name = f"Owner {mat.name} {team_hex}"
         tinted = bpy.data.materials.get(name)
         if tinted is None:
-            base = hex_to_linear(PALETTE[mat.name])
-            tinted = make_material(name, "#ffffff")
+            hexstr, roughness, metallic = PALETTE[mat.name]
+            base = hex_to_linear(hexstr)
+            tinted = make_material(name, "#ffffff", roughness, metallic)
             color = tuple(b * t for b, t in zip(base, team))
             bsdf = tinted.node_tree.nodes.get("Principled BSDF")
             bsdf.inputs["Base Color"].default_value = (*color, 1.0)
@@ -513,7 +618,7 @@ def render_previews(models, out_dir):
     tinted_copy(models["city"], PREVIEW_TEAMS[0], (-1.35, 0, 0))
     tinted_copy(models["warship"], PREVIEW_TEAMS[1], (0, 0, 0.04), rz=-35, s=1.5)
     tinted_copy(models["missile_silo"], PREVIEW_TEAMS[2], (1.35, 0, 0))
-    add_camera((0, -4.6, 3.4), (0, 0.05, 0.12), lens=58)
+    add_camera((0, -5.4, 4.0), (0, 0.05, 0.2), lens=58)
     render(os.path.join(out_dir, "models-closeup.png"))
     clear_preview_objects(keep)
 
@@ -553,8 +658,8 @@ def main():
     args = parser.parse_args(argv)
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    for name, hexstr in PALETTE.items():
-        make_material(name, hexstr)
+    for name, (hexstr, roughness, metallic) in PALETTE.items():
+        make_material(name, hexstr, roughness, metallic)
 
     os.makedirs(args.out, exist_ok=True)
     models = {}
