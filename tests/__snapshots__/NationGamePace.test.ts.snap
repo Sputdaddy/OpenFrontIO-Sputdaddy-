@@ -171,7 +171,6 @@ exports[`nation game pace > world map, medium nations and 400 tribes, 20 minutes
     "leaderPctAt10Min": 11.6,
     "leaderPctAt20Min": 22.8,
     "leaderPctAt5Min": 7,
-    "map90PctClaimedAtMin": 1,
     "nationsAliveAt10Min": 41,
     "nationsAliveAt20Min": 23,
     "tribesAliveAt10Min": 2,
