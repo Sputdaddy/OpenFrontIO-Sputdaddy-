@@ -8,11 +8,12 @@
  * composited onto the terrain in the fragment shader from the live tile
  * state, the same way TerritoryPass does it.
  *
- * The camera is orthographic, tilted TILT_DEGREES from straight down and fed
- * by the same (centerX, centerY, zoom) state as the WebGL2 Camera. Its
- * frustum is squashed so sea level lands exactly where the flat camera puts
- * it; raised ground is drawn further up the screen, and TransformHandler
- * corrects for that through `elevation` (see Elevation.ts).
+ * The camera is orthographic, looks north and is fed by the same (centerX,
+ * centerY, zoom) state as the WebGL2 Camera, plus a tilt away from straight
+ * down that the player controls. Across the screen it matches the flat
+ * camera; down the screen the map is foreshortened and raised ground drawn
+ * further up, which TransformHandler follows through `elevation` (see
+ * Elevation.ts).
  *
  * Units and structures are drawn as 3D models (UnitModels), and railroads
  * are drawn into the terrain. Not drawn yet: names, trails, explosions and
@@ -52,7 +53,7 @@ import type {
   UnitState,
 } from "../types";
 import { buildCoastTextures } from "./CoastTextures";
-import { type SurfaceElevation, TILT_DEGREES, TILT_SHIFT } from "./Elevation";
+import { DEFAULT_TILT_DEGREES, type SurfaceElevation } from "./Elevation";
 import {
   buildHeightGrid,
   buildReliefNormals,
@@ -61,7 +62,6 @@ import {
 import { UnitModels } from "./UnitModels";
 
 const PALETTE_SIZE = getPaletteSize();
-const TILT = (TILT_DEGREES * Math.PI) / 180;
 // Camera distance from the point it looks at, beyond what the view needs.
 const CAMERA_MARGIN = 200;
 /** Terrain byte bit set on land tiles. */
@@ -84,6 +84,7 @@ export class ThreeMapRenderer implements MapView {
   private camX: number;
   private camY: number;
   private camZoom = 1;
+  private camTilt = DEFAULT_TILT_DEGREES;
 
   // Tile state mirrored into an RGBA8 texture: R = low byte, G = high byte of
   // the 16-bit tile state (owner in bits 0-11, fallout bit 13).
@@ -385,7 +386,6 @@ export class ThreeMapRenderer implements MapView {
     this.surface = new SurfaceHeights(terrainGeometry, this.mapW, this.mapH);
     const surface = this.surface;
     this.elevation = {
-      shift: TILT_SHIFT,
       maxHeight: surface.maxHeight,
       heightAt: (x, y) => surface.at(x, y),
     };
@@ -486,24 +486,26 @@ export class ThreeMapRenderer implements MapView {
     this.flushOwnerRows();
     const halfW = this.canvas.width / (2 * this.camZoom);
     const halfH = this.canvas.height / (2 * this.camZoom);
-    // Tilted toward the north. Squashing the frustum's height by cos(tilt)
-    // undoes the foreshortening, so sea level maps to the screen exactly as
-    // with a straight-down camera.
-    const cos = Math.cos(TILT);
-    const sin = Math.sin(TILT);
-    const dist = halfH * sin + this.surface.maxHeight + CAMERA_MARGIN;
+    // Looking north from the south, tilted away from straight down.
+    const tilt = (this.camTilt * Math.PI) / 180;
+    const cos = Math.cos(tilt);
+    const sin = Math.sin(tilt);
+    // Far enough back that the nearest thing in view, the top of the highest
+    // ground at the bottom edge, is still in front of the camera.
+    const dist = (halfH * sin + this.surface.maxHeight) / cos + CAMERA_MARGIN;
     const cam = this.camera;
     cam.left = -halfW;
     cam.right = halfW;
-    cam.top = halfH * cos;
-    cam.bottom = -halfH * cos;
+    cam.top = halfH;
+    cam.bottom = -halfH;
     cam.near = 1;
-    cam.far = dist * 2 + halfH;
+    cam.far = dist * 2;
     cam.position.set(this.camX, dist * cos, this.camY + dist * sin);
     cam.up.set(0, sin, -cos);
     cam.lookAt(this.camX, 0, this.camY);
     cam.updateProjectionMatrix();
-    this.fitSunToView(Math.max(halfW, halfH));
+    // The ground in view reaches halfH / cos north and south of the centre.
+    this.fitSunToView(Math.max(halfW, halfH / cos));
     this.units.draw(this.elevation.heightAt);
     this.renderer.render(this.scene, cam);
   }
@@ -554,10 +556,16 @@ export class ThreeMapRenderer implements MapView {
 
   // ---- MapView: camera ----
 
-  setCameraState(x: number, y: number, z: number): void {
+  setCameraState(
+    x: number,
+    y: number,
+    z: number,
+    tiltDegrees = DEFAULT_TILT_DEGREES,
+  ): void {
     this.camX = x;
     this.camY = y;
     this.camZoom = z;
+    this.camTilt = tiltDegrees;
   }
 
   // ---- MapView: territory ----

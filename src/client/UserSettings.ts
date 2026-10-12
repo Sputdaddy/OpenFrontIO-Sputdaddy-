@@ -49,6 +49,8 @@ export function getDefaultKeybinds(isMac: boolean): Record<string, string> {
     moveLeft: "KeyA",
     moveDown: "KeyS",
     moveRight: "KeyD",
+    tiltUp: "PageUp",
+    tiltDown: "PageDown",
     buildMenuModifier: isMac ? "MetaLeft" : "ControlLeft",
     emojiMenuModifier: "AltLeft",
     boxSelectWarships: "ShiftLeft",
@@ -415,6 +417,15 @@ export class UserSettings {
   /** Draw the map with the experimental Three.js 3D renderer. */
   threeRenderer() {
     return this.getBool("settings.threeRenderer", false);
+  }
+
+  /** The 3D map camera's tilt away from straight down, in degrees. */
+  cameraTilt(defaultDegrees: number): number {
+    return this.getFloat("settings.cameraTilt", defaultDegrees);
+  }
+
+  setCameraTilt(degrees: number): void {
+    this.setFloat("settings.cameraTilt", degrees);
   }
 
   lobbyIdVisibility() {

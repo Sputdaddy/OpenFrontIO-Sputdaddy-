@@ -160,7 +160,8 @@ export class MapRenderer {
 
   // ---- Camera ----
 
-  setCameraState(x: number, y: number, z: number): void {
+  /** `_tiltDegrees` is for the 3D map; this map is always seen straight down. */
+  setCameraState(x: number, y: number, z: number, _tiltDegrees = 0): void {
     this.renderer?.setCameraState(x, y, z);
   }
 

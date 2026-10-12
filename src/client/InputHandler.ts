@@ -89,6 +89,11 @@ export class DragEvent implements GameEvent {
   ) {}
 }
 
+/** Tilt the 3D map's camera by `degrees`; positive tilts toward the horizon. */
+export class CameraTiltEvent implements GameEvent {
+  constructor(public readonly degrees: number) {}
+}
+
 export class AlternateViewEvent implements GameEvent {
   constructor(public readonly alternateView: boolean) {}
 }
@@ -319,7 +324,19 @@ export class InputHandler {
 
   private readonly PAN_SPEED = 5;
   private readonly ZOOM_SPEED = 10;
+  private readonly TILT_SPEED = 0.15;
+  private readonly TILT_DEGREES_PER_PX = 0.25;
   private readonly DRAG_THRESHOLD_PX = 10;
+
+  // A middle-button press on the 3D map: dragging it tilts the camera, and
+  // releasing it without a drag is a click (auto-upgrade).
+  private tiltDrag: {
+    pointerId: number;
+    downX: number;
+    downY: number;
+    lastY: number;
+    dragging: boolean;
+  } | null = null;
 
   private readonly userSettings: UserSettings = new UserSettings();
 
@@ -328,6 +345,8 @@ export class InputHandler {
     public uiState: UIState,
     private canvas: HTMLElement,
     private eventBus: EventBus,
+    /** Whether the map is the 3D one, whose camera can tilt. */
+    private readonly canTilt = false,
   ) {}
 
   initialize() {
@@ -423,6 +442,7 @@ export class InputHandler {
     this.suppressNextTap = false;
     this.selectionBoxActive = false;
     this.multiSelectionActive = false;
+    this.tiltDrag = null;
   }
 
   /** Re-read the player's keybinds and rebuild the key dispatch table. */
@@ -713,6 +733,13 @@ export class InputHandler {
         this.eventBus.emit(new DragEvent(deltaX, deltaY));
       }
 
+      if (this.activeKeys.has(this.keybinds.tiltUp)) {
+        this.eventBus.emit(new CameraTiltEvent(this.TILT_SPEED));
+      }
+      if (this.activeKeys.has(this.keybinds.tiltDown)) {
+        this.eventBus.emit(new CameraTiltEvent(-this.TILT_SPEED));
+      }
+
       const cx = window.innerWidth / 2;
       const cy = window.innerHeight / 2;
 
@@ -844,6 +871,8 @@ export class InputHandler {
             this.keybinds.moveRight,
             this.keybinds.zoomOut,
             this.keybinds.zoomIn,
+            this.keybinds.tiltUp,
+            this.keybinds.tiltDown,
             "ArrowUp",
             "ArrowLeft",
             "ArrowDown",
@@ -946,6 +975,17 @@ export class InputHandler {
   private onPointerDown(event: PointerEvent) {
     if (event.button === 1) {
       event.preventDefault();
+      if (this.canTilt) {
+        // Wait for the release to tell a click from a tilting drag.
+        this.tiltDrag = {
+          pointerId: event.pointerId,
+          downX: event.clientX,
+          downY: event.clientY,
+          lastY: event.clientY,
+          dragging: false,
+        };
+        return;
+      }
       this.eventBus.emit(new AutoUpgradeEvent(event.clientX, event.clientY));
       return;
     }
@@ -1067,6 +1107,11 @@ export class InputHandler {
   onPointerUp(event: PointerEvent) {
     if (event.button === 1) {
       event.preventDefault();
+      const press = this.tiltDrag;
+      this.tiltDrag = null;
+      if (press !== null && !press.dragging) {
+        this.eventBus.emit(new AutoUpgradeEvent(press.downX, press.downY));
+      }
       return;
     }
 
@@ -1241,6 +1286,13 @@ export class InputHandler {
   }
 
   private onPointerMove(event: PointerEvent) {
+    if (
+      this.tiltDrag?.pointerId === event.pointerId &&
+      this.onTiltDrag(event)
+    ) {
+      return;
+    }
+
     if (event.button === 1) {
       event.preventDefault();
       return;
@@ -1495,6 +1547,35 @@ export class InputHandler {
   private canUseBuildKeybinds(): boolean {
     const myPlayer = this.gameView.myPlayer?.();
     return !this.gameView.inSpawnPhase() && myPlayer?.isAlive() === true;
+  }
+
+  /**
+   * Tilts the 3D camera while the middle button is dragged: up toward the
+   * horizon, down toward straight down. Returns false once the button is no
+   * longer held (its release went unseen), and forgets the press.
+   */
+  private onTiltDrag(event: PointerEvent): boolean {
+    const drag = this.tiltDrag;
+    if (drag === null) return false;
+    if ((event.buttons & 4) === 0) {
+      this.tiltDrag = null;
+      return false;
+    }
+    if (!drag.dragging) {
+      const distance =
+        Math.abs(event.clientX - drag.downX) +
+        Math.abs(event.clientY - drag.downY);
+      if (distance < this.DRAG_THRESHOLD_PX) return true;
+      drag.dragging = true;
+    }
+    const deltaY = event.clientY - drag.lastY;
+    drag.lastY = event.clientY;
+    if (deltaY !== 0) {
+      this.eventBus.emit(
+        new CameraTiltEvent(-deltaY * this.TILT_DEGREES_PER_PX),
+      );
+    }
+    return true;
   }
 
   private getPinchDistance(): number {
