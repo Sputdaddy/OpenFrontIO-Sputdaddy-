@@ -51,8 +51,8 @@ interface ModelSpec {
 }
 
 /**
- * Every model, by key. Sizes are for the World map and match MAP_SIZES in
- * build_models.py; other maps scale them (modelSize).
+ * Every model, by key. Sizes match MAP_SIZES in build_models.py; each map
+ * scales them (mapScale, modelSize).
  */
 export const UNIT_MODELS: Readonly<Record<string, ModelSpec>> = {
   city: { file: "models/city.glb", size: 9, kind: "structure" },
@@ -129,10 +129,12 @@ export function modelFor(
 }
 
 /**
- * Model sizes are tuned on the World map (2000x1000). Other maps scale them
- * by their size relative to it, so models take up about as much of the
- * screen when the whole map is in view, within these bounds.
+ * Models are drawn this fraction of their size in UNIT_MODELS on the World
+ * map (2000x1000). Other maps scale that by their size relative to World,
+ * so models take up about as much of the screen when the whole map is in
+ * view, within these bounds.
  */
+const MODEL_SCALE = 0.7;
 const REFERENCE_MAP_SIZE = Math.sqrt(2000 * 1000);
 const MIN_MAP_SCALE = 0.6;
 const MAX_MAP_SCALE = 1.6;
@@ -167,10 +169,10 @@ const BLACK = new THREE.Color(0, 0, 0);
 const GHOST_ORDER = 1;
 const MODEL_ORDER = 2;
 
-/** How much bigger than their World-map size models are on this map. */
+/** How big models are on this map, relative to their UNIT_MODELS size. */
 export function mapScale(width: number, height: number): number {
   const scale = Math.sqrt(width * height) / REFERENCE_MAP_SIZE;
-  return Math.min(MAX_MAP_SCALE, Math.max(MIN_MAP_SCALE, scale));
+  return MODEL_SCALE * Math.min(MAX_MAP_SCALE, Math.max(MIN_MAP_SCALE, scale));
 }
 
 /**

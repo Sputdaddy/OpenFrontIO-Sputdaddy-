@@ -63,16 +63,19 @@ describe("3D model sizes", () => {
   // Config.structureMinDist: the closest two structures can be.
   const SPACING = 15;
 
-  it("keeps World-map sizes on the World map", () => {
-    expect(mapScale(2000, 1000)).toBeCloseTo(1);
-    expect(modelSize("warship", 1, 1, SPACING)).toBe(UNIT_MODELS.warship.size);
+  it("scales models with the map's size", () => {
+    const world = mapScale(2000, 1000);
+    expect(mapScale(2400, 1200) / world).toBeCloseTo(1.2);
+    expect(modelSize("warship", 1, world, SPACING)).toBeCloseTo(
+      UNIT_MODELS.warship.size * world,
+    );
   });
 
   it("draws models bigger on bigger maps and smaller on smaller ones", () => {
     const small = mapScale(1000, 1000);
     const big = mapScale(2500, 2500);
-    expect(small).toBeLessThan(1);
-    expect(big).toBeGreaterThan(1);
+    expect(small).toBeLessThan(mapScale(2000, 1000));
+    expect(big).toBeGreaterThan(mapScale(2000, 1000));
     expect(modelSize("warship", 1, small, SPACING)).toBeLessThan(
       modelSize("warship", 1, big, SPACING),
     );
@@ -90,7 +93,6 @@ describe("3D model sizes", () => {
       // A square this wide, turned any way, fits in a circle SPACING across.
       const size = modelSize(key, 1, scale, SPACING);
       expect(size * Math.SQRT2, key).toBeLessThanOrEqual(SPACING + 1e-9);
-      expect(size, key).toBeGreaterThanOrEqual(spec.size);
     }
   });
 
