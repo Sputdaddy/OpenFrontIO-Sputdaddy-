@@ -1,0 +1,42 @@
+{
+  "source": "Poly Haven, CC0",
+  "resolution": "2k",
+  "layers": {
+    "grass": {
+      "color": "grass_color.jpg",
+      "normal": "grass_normal.jpg",
+      "rough": "grass_rough.jpg",
+      "height": "grass_height.jpg"
+    },
+    "forest": {
+      "color": "forest_color.jpg",
+      "normal": "forest_normal.jpg",
+      "rough": "forest_rough.jpg",
+      "height": "forest_height.jpg"
+    },
+    "dry": {
+      "color": "dry_color.jpg",
+      "normal": "dry_normal.jpg",
+      "rough": "dry_rough.jpg",
+      "height": "dry_height.jpg"
+    },
+    "rock": {
+      "color": "rock_color.jpg",
+      "normal": "rock_normal.jpg",
+      "rough": "rock_rough.jpg",
+      "height": "rock_height.jpg"
+    },
+    "snow": {
+      "color": "snow_color.jpg",
+      "normal": "snow_normal.jpg",
+      "rough": "snow_rough.jpg",
+      "height": "snow_height.jpg"
+    },
+    "sand": {
+      "color": "sand_color.jpg",
+      "normal": "sand_normal.jpg",
+      "rough": "sand_rough.jpg",
+      "height": "sand_height.jpg"
+    }
+  }
+}

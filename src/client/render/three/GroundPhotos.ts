@@ -24,13 +24,18 @@ export interface GroundLayer {
   readonly polyhaven: string;
   /** How many tiles one copy of the photo spans. */
   readonly tiles: number;
+  /**
+   * How far the photo is tinted towards each tile's own colour, 0-1: at 1
+   * only its light and shade (and a little of its colour) are kept.
+   */
+  readonly tint: number;
 }
 
 /** The layers, in texture array order. */
 export const GROUND_LAYERS: readonly GroundLayer[] = config.layers;
 
 /** Width and height each photo is resized to. */
-export const PHOTO_SIZE = 1024;
+export const PHOTO_SIZE = 2048;
 
 /** Folder (under resources/) holding the photos and their index.json. */
 const PHOTO_DIR = "textures/terrain";

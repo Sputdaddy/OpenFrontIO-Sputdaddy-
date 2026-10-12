@@ -1,8 +1,11 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   GROUND_LAYERS,
   meanLinearColor,
   packGroundLayer,
+  type PhotoMap,
 } from "../src/client/render/three/GroundPhotos";
 
 /** A w-pixel RGBA image filled with one value per channel. */
@@ -19,7 +22,24 @@ describe("Three.js ground photos", () => {
     );
     for (const layer of GROUND_LAYERS) {
       expect(layer.tiles).toBeGreaterThan(0);
+      expect(layer.tint).toBeGreaterThanOrEqual(0);
+      expect(layer.tint).toBeLessThanOrEqual(1);
       expect(layer.polyhaven).toMatch(/^[a-z0-9_]+$/);
+    }
+  });
+
+  it("has the photos for every layer downloaded", () => {
+    const dir = path.join(__dirname, "../resources/textures/terrain");
+    const index = JSON.parse(
+      fs.readFileSync(path.join(dir, "index.json"), "utf8"),
+    ) as { layers: Record<string, Partial<Record<PhotoMap, string>>> };
+    for (const layer of GROUND_LAYERS) {
+      const files = index.layers[layer.key];
+      expect(files?.color, layer.key).toBeDefined();
+      expect(files?.normal, layer.key).toBeDefined();
+      for (const file of Object.values(files)) {
+        expect(fs.existsSync(path.join(dir, file)), file).toBe(true);
+      }
     }
   });
 

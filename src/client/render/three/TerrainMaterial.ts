@@ -9,11 +9,11 @@
  *   lighting. Detail finer than a couple of pixels fades out, so it adds
  *   sharpness up close without shimmering zoomed out.
  * - Photos. Once the ground photos (GroundPhotos) have loaded, each kind of
- *   ground is painted from its photo instead, tinted towards the tile's own
- *   colour, with its normal map for the lighting. Two copies of each photo
- *   at different offsets are cross-faded so it doesn't visibly repeat, and
- *   neighbouring kinds blend by the photos' heights (grass gives way to rock
- *   between the stones, not in a smooth fade).
+ *   ground is painted from its photo instead: the photo's light and shade
+ *   over the tile's own colour, with its normal map for the lighting. The
+ *   photo is laid in randomly shifted hexagons so it doesn't visibly repeat,
+ *   and neighbouring kinds blend by the photos' heights (grass gives way to
+ *   rock between the stones, not in a smooth fade).
  * - Coast. Land and water colours meet where the smoothed land mask crosses
  *   one half (smoothMask), and the seabed gets caustics in the shallows.
  * - Territory. A translucent fill so the ground shows through, and a solid
@@ -36,8 +36,17 @@ export const TERRITORY_FILL_ALPHA = 0.3;
 const HIGHLIGHT_FILL_BOOST = 0.15;
 /** Height (world units) above which high ground is snow-capped. */
 const SNOW_LINE = 4.6;
-/** How far the photos are tinted towards each tile's own colour (0-1). */
-const PHOTO_TINT = 0.5;
+/** How much of the photos' own colour variation the tint keeps (0-1). */
+const PHOTO_CHROMA = 0.15;
+/** How much the photos' contrast is toned down when zoomed far out (0-1). */
+const PHOTO_FAR_FLATTEN = 0.5;
+/** Hexagons per photo width (about); smaller hexagons hide repeats better. */
+const PHOTO_HEX_RATE = 2 * Math.sqrt(3);
+/**
+ * Most each hexagon is turned either way (radians): small enough that rock
+ * keeps one grain instead of looking shattered.
+ */
+const PHOTO_HEX_TURN = 0.5;
 /** Strength of the photos' normal maps in the lighting. */
 const PHOTO_BUMP = 0.3;
 /** How much the photos' heights decide where one kind of ground gives way. */
@@ -95,6 +104,7 @@ function terrainUniforms(
       value: GROUND_LAYERS.map(() => new THREE.Vector3(0.5, 0.5, 0.5)),
     },
     uPhotoTiles: { value: GROUND_LAYERS.map((l) => l.tiles) },
+    uPhotoTint: { value: GROUND_LAYERS.map((l) => l.tint) },
   };
 }
 
@@ -190,32 +200,76 @@ uniform sampler2DArray uPhotoNormal;
 uniform float uPhotoOn[PHOTO_LAYERS];
 uniform vec3 uPhotoMean[PHOTO_LAYERS];
 uniform float uPhotoTiles[PHOTO_LAYERS];
+uniform float uPhotoTint[PHOTO_LAYERS];
 ${NOISE_GLSL}
 ${SMOOTH_MASK_GLSL}
 ${WATER_GLSL}
 
-// One photo layer at tile position p (derivatives dx, dy), with its repeats
-// hidden: two copies at different offsets, cross-faded by a slowly varying
-// index (after Inigo Quilez's "texture repetition").
-void samplePhoto(int layer, vec2 p, vec2 dx, vec2 dy, float index,
-    out vec4 color, out vec4 normal) {
-  float s = 1.0 / uPhotoTiles[layer];
-  vec2 uv = p * s;
-  vec2 gx = dx * s;
-  vec2 gy = dy * s;
-  float l = index * 8.0;
-  float i = floor(l);
-  float f = l - i;
-  vec2 offA = sin(vec2(3.0, 7.0) * i);
-  vec2 offB = sin(vec2(3.0, 7.0) * (i + 1.0));
-  float z = float(layer);
-  vec4 ca = textureGrad(uPhotoColor, vec3(uv + offA, z), gx, gy);
-  vec4 cb = textureGrad(uPhotoColor, vec3(uv + offB, z), gx, gy);
-  vec4 na = textureGrad(uPhotoNormal, vec3(uv + offA, z), gx, gy);
-  vec4 nb = textureGrad(uPhotoNormal, vec3(uv + offB, z), gx, gy);
-  float b = smoothstep(0.2, 0.8, f - 0.1 * dot(ca.rgb - cb.rgb, vec3(1.0)));
-  color = mix(ca, cb, b);
-  normal = mix(na, nb, b);
+// The photos are laid in hexagons (after Morten Mikkelsen's "Practical
+// Real-Time Hex-Tiling"), each cut from a random spot of the photo and
+// turned a little, so the photo never visibly repeats. Where hexagons
+// meet, the brighter one wins over a narrow band rather than both fading,
+// which keeps the photo's contrast.
+const mat2 HEX_SKEW = mat2(1.0, -0.57735027, 0.0, 1.15470054);
+const mat2 HEX_UNSKEW = mat2(1.0, 0.5, 0.0, 0.8660254);
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+// One hexagon's sample: its photo position turned and moved by a random
+// amount around the hexagon's centre.
+void hexSample(int layer, ivec2 v, vec2 uv, vec2 gx, vec2 gy,
+    out vec4 color, out vec4 normal, out mat2 turn) {
+  uint h = cellHash(v, uint(layer) * 7919u + 3u);
+  float a = (float(h & 1023u) / 512.0 - 1.0) * ${PHOTO_HEX_TURN.toFixed(2)};
+  vec2 off = vec2(float((h >> 10u) & 2047u), float(h >> 21u)) / 2048.0;
+  float c = cos(a);
+  float s = sin(a);
+  turn = mat2(c, s, -s, c);
+  vec2 centre = HEX_UNSKEW * vec2(v) / ${PHOTO_HEX_RATE.toFixed(4)};
+  vec3 at = vec3(turn * (uv - centre) + centre + off, float(layer));
+  color = textureGrad(uPhotoColor, at, turn * gx, turn * gy);
+  normal = textureGrad(uPhotoNormal, at, turn * gx, turn * gy);
+}
+
+// One photo layer at tile position p (derivatives dx, dy): colour with
+// roughness in alpha, and the ground's slope along the map's x and y with
+// the photo's height in alpha.
+void samplePhoto(int layer, vec2 p, vec2 dx, vec2 dy,
+    out vec4 color, out vec4 slope) {
+  float scale = 1.0 / uPhotoTiles[layer];
+  vec2 uv = p * scale;
+  vec2 gx = dx * scale;
+  vec2 gy = dy * scale;
+  // Barycentric weights of the triangle grid whose vertices are the
+  // hexagons' centres.
+  vec2 st = HEX_SKEW * (uv * ${PHOTO_HEX_RATE.toFixed(4)});
+  ivec2 base = ivec2(floor(st));
+  vec3 t = vec3(fract(st), 0.0);
+  t.z = 1.0 - t.x - t.y;
+  float up = step(0.0, -t.z);
+  float sg = 2.0 * up - 1.0;
+  vec3 w = vec3(-t.z * sg, up - t.y * sg, up - t.x * sg);
+  int iu = int(up);
+  ivec2 v1 = base + ivec2(iu, iu);
+  ivec2 v2 = base + ivec2(iu, 1 - iu);
+  ivec2 v3 = base + ivec2(1 - iu, iu);
+  vec4 c1, c2, c3, n1, n2, n3;
+  mat2 r1, r2, r3;
+  hexSample(layer, v1, uv, gx, gy, c1, n1, r1);
+  hexSample(layer, v2, uv, gx, gy, c2, n2, r2);
+  hexSample(layer, v3, uv, gx, gy, c3, n3, r3);
+  vec3 lum = vec3(dot(c1.rgb, LUMA), dot(c2.rgb, LUMA), dot(c3.rgb, LUMA));
+  w *= mix(vec3(1.0), lum, 0.6);
+  w = pow(max(w, vec3(1e-4)), vec3(7.0));
+  w /= w.x + w.y + w.z;
+  color = c1 * w.x + c2 * w.y + c3 * w.z;
+  // Normal map (OpenGL convention, image up is north) to a height slope in
+  // the photo's own frame, then turned back to the map's.
+  vec2 g1 = vec2(-(n1.x * 2.0 - 1.0), n1.y * 2.0 - 1.0) / max(n1.z * 2.0 - 1.0, 0.25);
+  vec2 g2 = vec2(-(n2.x * 2.0 - 1.0), n2.y * 2.0 - 1.0) / max(n2.z * 2.0 - 1.0, 0.25);
+  vec2 g3 = vec2(-(n3.x * 2.0 - 1.0), n3.y * 2.0 - 1.0) / max(n3.z * 2.0 - 1.0, 0.25);
+  slope.xy = (g1 * r1) * w.x + (g2 * r2) * w.y + (g3 * r3) * w.z;
+  slope.z = 0.0;
+  slope.w = n1.a * w.x + n2.a * w.y + n3.a * w.z;
 }
 
 float segmentDistance(vec2 p, vec2 a, vec2 b, out float along) {
@@ -371,13 +425,13 @@ float landMix = 0.0;
   float pw[PHOTO_LAYERS];
   vec3 tone[PHOTO_LAYERS];
   pw[PHOTO_GRASS] = kind.r * (1.0 - woods);
-  tone[PHOTO_GRASS] = base;
+  tone[PHOTO_GRASS] = base * mix(vec3(1.0), vec3(1.12, 1.02, 0.72), dry * 0.7);
   pw[PHOTO_FOREST] = kind.r * woods;
   tone[PHOTO_FOREST] = base * vec3(0.5, 0.64, 0.45);
   pw[PHOTO_DRY] = kind.g;
   tone[PHOTO_DRY] = base * vec3(0.97, 0.93, 0.89);
   pw[PHOTO_ROCK] = kind.b;
-  tone[PHOTO_ROCK] = mix(vec3(0.24, 0.23, 0.21), base * 0.55, 0.45) * 1.15;
+  tone[PHOTO_ROCK] = mix(vec3(0.24, 0.23, 0.21), base * 0.55, 0.45);
   pw[PHOTO_SNOW] = 0.0;
   tone[PHOTO_SNOW] = vec3(0.84, 0.88, 0.93);
   pw[PHOTO_SAND] = kind.a;
@@ -393,17 +447,16 @@ float landMix = 0.0;
     photoCover += pw[k];
   }
   if (photoCover > 0.002) {
-    float index = 0.5 + 0.6 * gradNoise(tp * 0.06, 41u).x;
     vec4 pc[PHOTO_LAYERS];
     vec4 pn[PHOTO_LAYERS];
     float hw[PHOTO_LAYERS];
     float top = -1.0;
     for (int k = 0; k < PHOTO_LAYERS; k++) {
       pc[k] = vec4(0.0);
-      pn[k] = vec4(0.5, 0.5, 1.0, 0.5);
+      pn[k] = vec4(0.0, 0.0, 0.0, 0.5);
       hw[k] = -2.0;
       if (pw[k] > 0.002) {
-        samplePhoto(k, tp, tpDx, tpDy, index, pc[k], pn[k]);
+        samplePhoto(k, tp, tpDx, tpDy, pc[k], pn[k]);
         hw[k] = pw[k] + pn[k].a * ${PHOTO_HEIGHT_BLEND.toFixed(2)};
         top = max(top, hw[k]);
       }
@@ -413,16 +466,19 @@ float landMix = 0.0;
     float pRough = 0.0;
     float total = 0.0;
     float forestShare = 0.0;
+    // Zoomed out, the photos' patchiness is toned down so the map stays calm.
+    float far = ${PHOTO_FAR_FLATTEN.toFixed(2)} * smoothstep(0.4, 2.0, px);
     for (int k = 0; k < PHOTO_LAYERS; k++) {
       float b = max(hw[k] - top + ${PHOTO_BLEND_DEPTH.toFixed(2)}, 0.0);
       if (b <= 0.0) continue;
-      vec3 c = pc[k].rgb;
-      c = mix(c, c * tone[k] / max(uPhotoMean[k], vec3(0.01)),
-        ${PHOTO_TINT.toFixed(2)});
-      vec3 n = pn[k].xyz * 2.0 - 1.0;
+      // The photo's light and shade, and some of its colour, over the tone.
+      vec3 mean = max(uPhotoMean[k], vec3(0.01));
+      vec3 c = mix(pc[k].rgb, mean, far);
+      vec3 shade = mix(vec3(dot(c, LUMA) / dot(mean, LUMA)), c / mean,
+        ${PHOTO_CHROMA.toFixed(2)});
+      c = mix(c, tone[k] * min(shade, vec3(2.5)), uPhotoTint[k]);
       pColor += c * b;
-      // Image up (+green) is north, towards smaller tile y.
-      pGrad += vec2(-n.x, n.y) / max(n.z, 0.25) * b;
+      pGrad += pn[k].xy * b;
       pRough += pc[k].a * b;
       total += b;
       if (k == PHOTO_FOREST) forestShare = b;
