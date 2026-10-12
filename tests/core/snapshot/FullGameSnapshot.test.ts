@@ -17,11 +17,19 @@ import { diffSnapshots } from "../../util/Snapshot";
  * same game snapshotted and restored along the way must agree on every
  * tick's hash and, at every checkpoint, on the snapshot bytes themselves
  * (the hash only covers troops, tiles and unit positions).
+ *
+ * Each game also records which execution types its snapshots hold, and the
+ * first snapshot holding each type is restored, so every type survives a
+ * restore in a full game.
  */
 
 const MAP = "world";
 const TICKS = 1500;
 const CHECK_EVERY = 100;
+// Execution types are sampled more often than checkpoints are taken:
+// missiles and shells live for a few dozen ticks, so most of them fall
+// between checkpoints.
+const SAMPLE_EVERY = 10;
 // Restore at every tick of this window, chaining each restore into the next.
 const WINDOW_START = 700;
 const WINDOW_TICKS = 40;
@@ -31,9 +39,9 @@ function hash(game: Game): number {
   return (game as unknown as { hash(): number }).hash();
 }
 
-function execTypesIn(bytes: Uint8Array, into: Set<string>): void {
+function execTypesIn(bytes: Uint8Array): Set<string> {
   const root = decodeSnapshotValue(bytes) as { execs: { t: string }[] };
-  for (const e of root.execs) into.add(e.t);
+  return new Set(root.execs.map((e) => e.t));
 }
 
 interface Reference {
@@ -42,6 +50,8 @@ interface Reference {
   final: Uint8Array;
   winnerTick: number | null;
   execTypes: Set<string>;
+  // The first sampled snapshot holding each execution type, by tick.
+  firstHolding: Map<number, { types: string[]; bytes: Uint8Array }>;
 }
 
 async function playReference(start: GameStartInfo): Promise<Reference> {
@@ -49,16 +59,24 @@ async function playReference(start: GameStartInfo): Promise<Reference> {
   const hashes: number[] = [];
   const checkpoints = new Map<number, Uint8Array>();
   const execTypes = new Set<string>();
+  const firstHolding = new Map<
+    number,
+    { types: string[]; bytes: Uint8Array }
+  >();
   let winnerTick: number | null = null;
   while (runner.game.ticks() < TICKS) {
     const tick = runner.game.ticks();
     if (
-      tick % CHECK_EVERY === 0 ||
+      tick % SAMPLE_EVERY === 0 ||
       (tick >= WINDOW_START && tick < WINDOW_START + WINDOW_TICKS)
     ) {
       const bytes = runner.snapshot();
       if (tick % CHECK_EVERY === 0) checkpoints.set(tick, bytes);
-      execTypesIn(bytes, execTypes);
+      const types = [...execTypesIn(bytes)].filter((t) => !execTypes.has(t));
+      if (types.length > 0) {
+        for (const t of types) execTypes.add(t);
+        firstHolding.set(tick, { types, bytes });
+      }
     }
     stepScripted(runner);
     hashes[runner.game.ticks()] = hash(runner.game);
@@ -72,6 +90,7 @@ async function playReference(start: GameStartInfo): Promise<Reference> {
     final: runner.snapshot(),
     winnerTick,
     execTypes,
+    firstHolding,
   };
 }
 
@@ -89,6 +108,9 @@ function expectOnTrack(runner: GameRunner, ref: Reference): void {
   }
 }
 
+// The execution types held by any of the games' snapshots.
+const execTypesSeen = new Set<string>();
+
 const VARIANTS: [string, Partial<GameConfig>][] = [
   ["free for all", {}],
   // Water nukes rewrite terrain and the water graph mid-game.
@@ -102,6 +124,7 @@ describe.each(VARIANTS)("full game snapshots: %s", (_, overrides) => {
 
   beforeAll(async () => {
     reference = await playReference(start);
+    for (const t of reference.execTypes) execTypesSeen.add(t);
   }, TEST_TIMEOUT);
   test(
     "snapshot -> restore -> snapshot is byte-identical at every checkpoint",
@@ -161,17 +184,32 @@ describe.each(VARIANTS)("full game snapshots: %s", (_, overrides) => {
   );
 
   test(
-    "the game exercised every execution type",
-    () => {
-      if (Object.keys(overrides).length > 0) return; // checked once, on FFA
-      // Runs during the spawn phase and finishes inside init, so it is never
-      // alive at a tick boundary. BasicExecutions.test.ts covers it directly.
-      const neverStored = new Set(["Pause"]);
-      const missing = EXECUTION_SNAPSHOT_TYPES.map((t) => t.name).filter(
-        (name) => !reference.execTypes.has(name) && !neverStored.has(name),
-      );
-      expect(missing).toEqual([]);
+    "the first snapshot holding each execution type restores byte-identically",
+    async () => {
+      for (const [tick, { types, bytes }] of reference.firstHolding) {
+        const restored = await restoreScriptedRunner(MAP, start, bytes);
+        expect(restored.game.ticks()).toBe(tick);
+        const diffs = diffSnapshots(restored.snapshot(), bytes);
+        expect(diffs, `tick ${tick} (${types.join(", ")})`).toEqual([]);
+      }
     },
     TEST_TIMEOUT,
   );
 });
+
+// Checked on all the games together: with this fork's slower conquest the
+// free-for-all game launches no SAM missiles or shells before TICKS, while
+// the other two do.
+test(
+  "the scripted games exercised every execution type",
+  () => {
+    // Runs during the spawn phase and finishes inside init, so it is never
+    // alive at a tick boundary. BasicExecutions.test.ts covers it directly.
+    const neverStored = new Set(["Pause"]);
+    const missing = EXECUTION_SNAPSHOT_TYPES.map((t) => t.name).filter(
+      (name) => !execTypesSeen.has(name) && !neverStored.has(name),
+    );
+    expect(missing).toEqual([]);
+  },
+  TEST_TIMEOUT,
+);

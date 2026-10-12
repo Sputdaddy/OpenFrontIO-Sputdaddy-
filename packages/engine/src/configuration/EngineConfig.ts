@@ -80,6 +80,15 @@ const SPEED_COST_DIVISOR = 8.55;
 // sub-parity floor on the ratio curve, an overwhelming push lands ~18%
 // faster for a small attacker, ~20% at the 300k midpoint, ~25% for giants.
 const LARGE_ATTACKER_SPEED_DEPTH = 0.73;
+// This fork's pace of conquest, on top of the formula above (1 = upstream).
+// LOSS scales the attacker's troop loss per tile, TIME how long each tile
+// takes. ATTACK_* apply to land taken from players (nations, tribes, humans),
+// EXPANSION_* to unclaimed land. tests/NationGamePace.test.ts measures a whole
+// game with these and can sweep other values (PACE_SWEEP=1).
+const ATTACK_LOSS_MULT = 1.5;
+const ATTACK_TIME_MULT = 1.5;
+const EXPANSION_LOSS_MULT = 1.5;
+const EXPANSION_TIME_MULT = 1.25;
 
 /**
  * Logistic in log(tiles): ~1 for small territories, easing down to
@@ -142,6 +151,26 @@ export class EngineConfig extends Config {
 
   defensePostSpeedBonus(): number {
     return 3;
+  }
+
+  /** Multiplier on the attacker's troop loss per tile taken from a player. */
+  attackLossMultiplier(): number {
+    return ATTACK_LOSS_MULT;
+  }
+
+  /** Multiplier on the time each tile taken from a player takes. */
+  attackTimeMultiplier(): number {
+    return ATTACK_TIME_MULT;
+  }
+
+  /** Multiplier on the troop loss per tile of unclaimed land. */
+  expansionLossMultiplier(): number {
+    return EXPANSION_LOSS_MULT;
+  }
+
+  /** Multiplier on the time each tile of unclaimed land takes. */
+  expansionTimeMultiplier(): number {
+    return EXPANSION_TIME_MULT;
   }
 
   playerTeams(): TeamCountConfig {
@@ -509,14 +538,18 @@ export class EngineConfig extends Config {
     if (defender === null) {
       const tickBudget = input.borderSize * 2;
       return {
-        attackerTroopLoss: mag / (attacker.type === PlayerType.Bot ? 10 : 5),
+        attackerTroopLoss:
+          (mag / (attacker.type === PlayerType.Bot ? 10 : 5)) *
+          this.expansionLossMultiplier(),
         defenderTroopLoss: 0,
         tickFraction:
-          within(
+          (within(
             (TERRA_NULLIUS_COST_SCALE * tileCost) / attackTroops,
             TERRA_NULLIUS_MIN_COST,
             TERRA_NULLIUS_MAX_COST,
-          ) / tickBudget,
+          ) /
+            tickBudget) *
+          this.expansionTimeMultiplier(),
       };
     }
 
@@ -559,7 +592,8 @@ export class EngineConfig extends Config {
       traitorLossMod *
       within(troopRatio, 0.6, 2) *
       (ATTACKER_LOSS_BASE * largeAttackerBonus * largeDefenderBonus +
-        ATTACKER_LOSS_PER_DENSITY * defenderTroopLoss);
+        ATTACKER_LOSS_PER_DENSITY * defenderTroopLoss) *
+      this.attackLossMultiplier();
 
     // Speed: a tile's cost in tick-fractions grows with how outnumbered the
     // attack is. Floored at 0.82 below parity (overwhelming stacks land ~18%
@@ -580,7 +614,8 @@ export class EngineConfig extends Config {
           tileCost *
           largeAttackerSpeedBonus *
           largeDefenderBonus *
-          traitorCostMod) /
+          traitorCostMod *
+          this.attackTimeMultiplier()) /
         input.borderSize,
     };
   }
