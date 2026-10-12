@@ -6,12 +6,13 @@
  *
  * They are the 2D map's own passes (NamePass, WorldTextPass,
  * StructureLevelPass, BarPass), drawn on the three.js renderer's WebGL2
- * context after the 3D scene, on top of it. They draw with the flat 2D
+ * context after the 3D scene, on top of it. They draw with a flat 2D
  * camera, so labels face the screen and keep their 2D size at every zoom.
  * What changes is where each one is anchored: at the spot on the screen
  * where the tilted camera draws the ground (or the top of the model) it
- * belongs to. The passes keep their anchors from tick to tick, so they're
- * placed again whenever the camera moves in a way that shifts them.
+ * belongs to. Panning moves every label by the same amount, which the flat
+ * camera takes care of; only a change of tilt, or models loading, places
+ * them again.
  */
 
 import type { Config } from "@openfront/engine-lib/configuration/Config";
@@ -86,11 +87,33 @@ export function nameGround(entry: NameEntry, heightAt: HeightAt): number {
 }
 
 /**
- * Rows up the screen a label anchored at row y, at height h, has to move to
- * sit where the camera draws that spot.
+ * Labels are anchored at row `y * rowScale - h * raise` and drawn with
+ * labelCamera, which puts that row where the 3D camera draws (y, h). This
+ * is how far up from row y that anchor is. It doesn't depend on where the
+ * camera is, so panning doesn't move labels' anchors.
  */
-export function labelLift(v: LabelView, y: number, h: number): number {
-  return y - (v.camY + (y - v.camY) * v.rowScale - h * v.raise);
+export function labelLift(
+  v: Pick<LabelView, "rowScale" | "raise">,
+  y: number,
+  h: number,
+): number {
+  return y * (1 - v.rowScale) + h * v.raise;
+}
+
+/**
+ * World → clip for the labels' anchors (column-major mat3): the flat 2D
+ * camera, moved to row camY * rowScale so the anchors line up with the map.
+ */
+export function labelCamera(v: LabelView, out: Float32Array): Float32Array {
+  const sx = (v.zoom * 2) / v.width;
+  const sy = (v.zoom * -2) / v.height;
+  out.fill(0);
+  out[0] = sx;
+  out[4] = sy;
+  out[6] = -v.camX * sx;
+  out[7] = -v.camY * v.rowScale * sy;
+  out[8] = 1;
+  return out;
 }
 
 export class LabelLayer {
@@ -99,7 +122,7 @@ export class LabelLayer {
   private readonly levels: StructureLevelPass;
   private readonly bars: BarPass;
   private readonly mapW: number;
-  /** World → clip for the flat 2D camera (column-major mat3). */
+  /** World → clip for the labels (labelCamera). */
   private readonly camera = new Float32Array(9);
   /** The view this frame; labels are placed for it. */
   private view: LabelView = {
@@ -121,8 +144,9 @@ export class LabelLayer {
   private lastUnits: Map<number, UnitState> = new Map();
   private lastStructures: Map<number, UnitState> = new Map();
   private lastTick = 0;
-  /** The view and models the per-tick labels were last placed for. */
-  private placed: LabelView = { ...this.view };
+  /** The tilt and models the per-tick labels were last placed for. */
+  private placedRowScale = 1;
+  private placedRaise = 0;
   private placedModels: number;
 
   private localPlayerID = 0;
@@ -267,8 +291,8 @@ export class LabelLayer {
 
   /**
    * The point of the map under the cursor. Names fade while the cursor is
-   * over them, and they're placed where the camera draws them, so test
-   * against where that point is drawn.
+   * over them, and they're anchored where the camera draws them, so test
+   * against that point's anchor.
    */
   setMouseWorldPos(x: number, y: number): void {
     const lift = labelLift(this.view, y, this.heightAt(x, y));
@@ -289,15 +313,7 @@ export class LabelLayer {
   draw(gl: WebGL2RenderingContext, view: LabelView): void {
     this.view = view;
     this.placeAgainIfMoved();
-
-    const m = this.camera;
-    const sx = (view.zoom * 2) / view.width;
-    const sy = (view.zoom * -2) / view.height;
-    m[0] = sx;
-    m[4] = sy;
-    m[6] = -view.camX * sx;
-    m[7] = -view.camY * sy;
-    m[8] = 1;
+    const m = labelCamera(view, this.camera);
 
     gl.viewport(0, 0, view.width, view.height);
     gl.enable(gl.BLEND);
@@ -318,22 +334,19 @@ export class LabelLayer {
 
   /**
    * Names, bars and levels are placed once a tick. Place them again when
-   * the camera's tilt changes, when it moves north or south while the map
-   * is foreshortened, or when models load and change how tall they are.
-   * World text is placed every frame and follows on its own.
+   * the camera's tilt changes, or when models load and change how tall they
+   * are. World text is placed every frame and follows on its own.
    */
   private placeAgainIfMoved(): void {
     const v = this.view;
-    const p = this.placed;
     const models = this.anchors.loadedModels;
-    const moved =
-      v.rowScale !== p.rowScale ||
-      v.raise !== p.raise ||
-      (v.rowScale !== 1 && v.camY !== p.camY);
-    if (!moved && models === this.placedModels) return;
-    this.placed = { ...v };
+    const tilted =
+      v.rowScale !== this.placedRowScale || v.raise !== this.placedRaise;
+    if (!tilted && models === this.placedModels) return;
+    this.placedRowScale = v.rowScale;
+    this.placedRaise = v.raise;
     this.placedModels = models;
-    if (moved) {
+    if (tilted) {
       this.names.updateNames(
         this.liftNames(),
         this.lastPlayers,

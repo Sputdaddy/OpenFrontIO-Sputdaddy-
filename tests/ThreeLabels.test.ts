@@ -16,6 +16,7 @@ import { StructureLevelPass } from "../src/client/render/gl/passes/StructureLeve
 import { WorldTextPass } from "../src/client/render/gl/passes/WorldTextPass";
 import { createRenderSettings } from "../src/client/render/gl/RenderSettings";
 import {
+  labelCamera,
   LabelLayer,
   labelLift,
   type LabelView,
@@ -146,6 +147,9 @@ const view = (v: Partial<LabelView> = {}): LabelView => ({
   ...v,
 });
 
+/** Clip-space y of world row `row` under a column-major mat3. */
+const clipY = (m: Float32Array, row: number) => m[4] * row + m[7];
+
 describe("3D map label placement", () => {
   it("raises a label by the height it sits at", () => {
     expect(labelLift(view(), 30, 2)).toBeCloseTo(1);
@@ -153,12 +157,39 @@ describe("3D map label placement", () => {
     expect(labelLift(view(), 30, 0)).toBe(0);
   });
 
-  it("follows a foreshortened map toward the middle of the view", () => {
-    // Rows are drawn half as far from the centre row (50).
-    const v = view({ rowScale: 0.5, raise: 0 });
-    expect(30 - labelLift(v, 30, 0)).toBe(40);
-    expect(70 - labelLift(v, 70, 0)).toBe(60);
-    expect(labelLift(v, 50, 0)).toBe(0);
+  it("anchors labels where the tilted camera draws their spot", () => {
+    const flat = new Float32Array(9);
+    const labels = new Float32Array(9);
+    for (const tilt of [0, 35, 70]) {
+      const a = (tilt * Math.PI) / 180;
+      for (const camY of [0, 37.5, 200]) {
+        const v = view({ camY, rowScale: Math.cos(a), raise: Math.sin(a) });
+        labelCamera(view({ camY, rowScale: 1, raise: 0 }), flat);
+        labelCamera(v, labels);
+        for (const [y, h] of [
+          [10, 0],
+          [30, 2.5],
+          [180, 6],
+        ]) {
+          const drawnRow = camY + (y - camY) * v.rowScale - h * v.raise;
+          const anchor = y - labelLift(v, y, h);
+          // Float32 matrices: 6 digits of clip space is far under a pixel.
+          expect(clipY(labels, anchor)).toBeCloseTo(clipY(flat, drawnRow), 6);
+        }
+      }
+    }
+  });
+
+  it("matches the flat camera across the screen", () => {
+    const v = view({ rowScale: 0.5, raise: 0.8 });
+    const flat = labelCamera(
+      view({ rowScale: 1, raise: 0 }),
+      new Float32Array(9),
+    );
+    const labels = labelCamera(v, new Float32Array(9));
+    expect(labels[0]).toBe(flat[0]);
+    expect(labels[6]).toBe(flat[6]);
+    expect(labels[4]).toBe(flat[4]);
   });
 
   it("averages the ground under a name, so one hill doesn't throw it", () => {
@@ -283,27 +314,26 @@ describe("3D map label layer", () => {
     expect(lastBarY(uploads)).toEqual([16]);
   });
 
-  it("moves bars as a foreshortened map pans north and south", () => {
+  it("anchors bars on a foreshortened map", () => {
     const gl = fakeGL(uploads);
     const labels = layer(gl);
     labels.updateUnits(new Map([[1, ship()]]), 0);
-    // The bar's row (tile centre 20.5) is drawn half as far from the view's
-    // centre row; the shader adds the half tile back.
-    labels.draw(gl, view({ rowScale: 0.5, raise: 0, camY: 40 }));
-    expect(lastBarY(uploads)).toEqual([29.75]);
-    labels.draw(gl, view({ rowScale: 0.5, raise: 0, camY: 20.5 }));
-    expect(lastBarY(uploads)).toEqual([20]);
+    // The bar's row is its tile centre (20.5) at half scale; the shader adds
+    // the half tile back.
+    labels.draw(gl, view({ rowScale: 0.5, raise: 0 }));
+    expect(lastBarY(uploads)).toEqual([9.75]);
   });
 
-  it("leaves bars alone while a flat map pans", () => {
+  it("leaves bars alone while the camera pans", () => {
     const gl = fakeGL(uploads);
     const labels = layer(gl);
     labels.updateUnits(new Map([[1, ship()]]), 0);
-    labels.draw(gl, view());
+    const tilted = { rowScale: 0.8, raise: 0.6 };
+    labels.draw(gl, view(tilted));
     const uploadsBefore = uploads.length;
-    labels.draw(gl, view({ camY: 10 }));
+    labels.draw(gl, view({ ...tilted, camX: 0, camY: 10 }));
     // Same bar data, drawn again without being placed again.
-    expect(lastBarY(uploads)).toEqual([18]);
     expect(uploads.length).toBe(uploadsBefore + 1);
+    expect(lastBarY(uploads)).toEqual([20 - (20.5 * 0.2 + 4 * 0.6)]);
   });
 });

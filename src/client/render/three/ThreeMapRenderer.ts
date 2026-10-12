@@ -527,15 +527,14 @@ export class ThreeMapRenderer implements MapView {
     this.units.draw(this.elevation.heightAt);
     this.renderer.render(this.scene, cam);
     this.renderer.resetState();
-    // The squashed frustum keeps sea level where the flat camera has it.
     this.labels.draw(this.gl, {
       camX: this.camX,
       camY: this.camY,
       zoom: this.camZoom,
       width: this.canvas.width,
       height: this.canvas.height,
-      rowScale: 1,
-      raise: TILT_SHIFT,
+      rowScale: cos,
+      raise: sin,
     });
     this.renderer.resetState();
   }
