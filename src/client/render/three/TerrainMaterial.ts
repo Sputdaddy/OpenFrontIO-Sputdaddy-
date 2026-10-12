@@ -8,6 +8,12 @@
  *   ground and wet sand at the waterline, each with matching bumps for the
  *   lighting. Detail finer than a couple of pixels fades out, so it adds
  *   sharpness up close without shimmering zoomed out.
+ * - Photos. Once the ground photos (GroundPhotos) have loaded, each kind of
+ *   ground is painted from its photo instead, tinted towards the tile's own
+ *   colour, with its normal map for the lighting. Two copies of each photo
+ *   at different offsets are cross-faded so it doesn't visibly repeat, and
+ *   neighbouring kinds blend by the photos' heights (grass gives way to rock
+ *   between the stones, not in a smooth fade).
  * - Coast. Land and water colours meet where the smoothed land mask crosses
  *   one half (smoothMask), and the seabed gets caustics in the shallows.
  * - Territory. A translucent fill so the ground shows through, and a solid
@@ -17,6 +23,11 @@
 
 import * as THREE from "three";
 import { DEPTH_SCALE } from "./CoastTextures";
+import {
+  emptyPhotoArray,
+  GROUND_LAYERS,
+  type GroundPhotos,
+} from "./GroundPhotos";
 import { NOISE_GLSL, SMOOTH_MASK_GLSL, WATER_GLSL } from "./ShaderLib";
 
 /** Territory fill opacity over the 3D terrain; borders stay solid. */
@@ -25,6 +36,14 @@ export const TERRITORY_FILL_ALPHA = 0.3;
 const HIGHLIGHT_FILL_BOOST = 0.15;
 /** Height (world units) above which high ground is snow-capped. */
 const SNOW_LINE = 4.6;
+/** How far the photos are tinted towards each tile's own colour (0-1). */
+const PHOTO_TINT = 0.5;
+/** Strength of the photos' normal maps in the lighting. */
+const PHOTO_BUMP = 0.3;
+/** How much the photos' heights decide where one kind of ground gives way. */
+const PHOTO_HEIGHT_BLEND = 0.6;
+/** Width of the height blend between kinds of ground. */
+const PHOTO_BLEND_DEPTH = 0.15;
 
 export interface TerrainTextures {
   /** Tile state: R low byte, G high byte (owner in bits 0-11, fallout 13). */
@@ -69,8 +88,33 @@ function terrainUniforms(
     uFillAlpha: { value: TERRITORY_FILL_ALPHA },
     uOceanColor: { value: oceanColor },
     uTime: time,
+    uPhotoColor: { value: emptyPhotoArray() },
+    uPhotoNormal: { value: emptyPhotoArray() },
+    uPhotoOn: { value: GROUND_LAYERS.map(() => 0) },
+    uPhotoMean: {
+      value: GROUND_LAYERS.map(() => new THREE.Vector3(0.5, 0.5, 0.5)),
+    },
+    uPhotoTiles: { value: GROUND_LAYERS.map((l) => l.tiles) },
   };
 }
+
+/** Paints the ground from the photos from now on. */
+export function applyGroundPhotos(
+  uniforms: TerrainUniforms,
+  photos: GroundPhotos,
+): void {
+  uniforms.uPhotoColor.value.dispose();
+  uniforms.uPhotoNormal.value.dispose();
+  uniforms.uPhotoColor.value = photos.color;
+  uniforms.uPhotoNormal.value = photos.normal;
+  uniforms.uPhotoOn.value = photos.present;
+  uniforms.uPhotoMean.value = photos.mean;
+}
+
+/** GLSL constants naming each photo layer's index, e.g. PHOTO_GRASS. */
+const PHOTO_LAYER_CONSTANTS = GROUND_LAYERS.map(
+  (l, i) => `const int PHOTO_${l.key.toUpperCase()} = ${i};`,
+).join("\n");
 
 export function createTerrainMaterial(
   textures: TerrainTextures,
@@ -139,9 +183,40 @@ uniform sampler2D uRail;
 uniform float uFillAlpha;
 uniform vec3 uOceanColor;
 uniform float uTime;
+#define PHOTO_LAYERS ${GROUND_LAYERS.length}
+${PHOTO_LAYER_CONSTANTS}
+uniform sampler2DArray uPhotoColor;
+uniform sampler2DArray uPhotoNormal;
+uniform float uPhotoOn[PHOTO_LAYERS];
+uniform vec3 uPhotoMean[PHOTO_LAYERS];
+uniform float uPhotoTiles[PHOTO_LAYERS];
 ${NOISE_GLSL}
 ${SMOOTH_MASK_GLSL}
 ${WATER_GLSL}
+
+// One photo layer at tile position p (derivatives dx, dy), with its repeats
+// hidden: two copies at different offsets, cross-faded by a slowly varying
+// index (after Inigo Quilez's "texture repetition").
+void samplePhoto(int layer, vec2 p, vec2 dx, vec2 dy, float index,
+    out vec4 color, out vec4 normal) {
+  float s = 1.0 / uPhotoTiles[layer];
+  vec2 uv = p * s;
+  vec2 gx = dx * s;
+  vec2 gy = dy * s;
+  float l = index * 8.0;
+  float i = floor(l);
+  float f = l - i;
+  vec2 offA = sin(vec2(3.0, 7.0) * i);
+  vec2 offB = sin(vec2(3.0, 7.0) * (i + 1.0));
+  float z = float(layer);
+  vec4 ca = textureGrad(uPhotoColor, vec3(uv + offA, z), gx, gy);
+  vec4 cb = textureGrad(uPhotoColor, vec3(uv + offB, z), gx, gy);
+  vec4 na = textureGrad(uPhotoNormal, vec3(uv + offA, z), gx, gy);
+  vec4 nb = textureGrad(uPhotoNormal, vec3(uv + offB, z), gx, gy);
+  float b = smoothstep(0.2, 0.8, f - 0.1 * dot(ca.rgb - cb.rgb, vec3(1.0)));
+  color = mix(ca, cb, b);
+  normal = mix(na, nb, b);
+}
 
 float segmentDistance(vec2 p, vec2 a, vec2 b, out float along) {
   vec2 ab = b - a;
@@ -205,6 +280,8 @@ float detailRough = roughness;
 float landMix = 0.0;
 {
   vec2 tp = vMapUv * uMapSize;
+  vec2 tpDx = dFdx(tp);
+  vec2 tpDy = dFdy(tp);
   float px = tilesPerPixel(tp);
   vec2 uvDx = dFdx(vMapUv);
   vec2 uvDy = dFdy(vMapUv);
@@ -288,6 +365,80 @@ float landMix = 0.0;
   ground = mix(ground, snowColor, snow);
   grad = mix(grad, 0.45 * rockGrad + 0.03 * nFine.yz, snow);
   rough = mix(rough, 0.55, snow);
+
+  // Photos, where they have loaded: the same kinds of ground under the same
+  // masks, each tinted towards the tone the procedural ground gives it.
+  float pw[PHOTO_LAYERS];
+  vec3 tone[PHOTO_LAYERS];
+  pw[PHOTO_GRASS] = kind.r * (1.0 - woods);
+  tone[PHOTO_GRASS] = base;
+  pw[PHOTO_FOREST] = kind.r * woods;
+  tone[PHOTO_FOREST] = base * vec3(0.5, 0.64, 0.45);
+  pw[PHOTO_DRY] = kind.g;
+  tone[PHOTO_DRY] = base * vec3(0.97, 0.93, 0.89);
+  pw[PHOTO_ROCK] = kind.b;
+  tone[PHOTO_ROCK] = mix(vec3(0.24, 0.23, 0.21), base * 0.55, 0.45) * 1.15;
+  pw[PHOTO_SNOW] = 0.0;
+  tone[PHOTO_SNOW] = vec3(0.84, 0.88, 0.93);
+  pw[PHOTO_SAND] = kind.a;
+  tone[PHOTO_SAND] = base;
+  float photoCover = 0.0;
+  for (int k = 0; k < PHOTO_LAYERS; k++) {
+    pw[k] *= (1.0 - cliff) * (1.0 - snow);
+  }
+  pw[PHOTO_ROCK] += cliff * (1.0 - snow);
+  pw[PHOTO_SNOW] += snow;
+  for (int k = 0; k < PHOTO_LAYERS; k++) {
+    pw[k] *= uPhotoOn[k];
+    photoCover += pw[k];
+  }
+  if (photoCover > 0.002) {
+    float index = 0.5 + 0.6 * gradNoise(tp * 0.06, 41u).x;
+    vec4 pc[PHOTO_LAYERS];
+    vec4 pn[PHOTO_LAYERS];
+    float hw[PHOTO_LAYERS];
+    float top = -1.0;
+    for (int k = 0; k < PHOTO_LAYERS; k++) {
+      pc[k] = vec4(0.0);
+      pn[k] = vec4(0.5, 0.5, 1.0, 0.5);
+      hw[k] = -2.0;
+      if (pw[k] > 0.002) {
+        samplePhoto(k, tp, tpDx, tpDy, index, pc[k], pn[k]);
+        hw[k] = pw[k] + pn[k].a * ${PHOTO_HEIGHT_BLEND.toFixed(2)};
+        top = max(top, hw[k]);
+      }
+    }
+    vec3 pColor = vec3(0.0);
+    vec2 pGrad = vec2(0.0);
+    float pRough = 0.0;
+    float total = 0.0;
+    float forestShare = 0.0;
+    for (int k = 0; k < PHOTO_LAYERS; k++) {
+      float b = max(hw[k] - top + ${PHOTO_BLEND_DEPTH.toFixed(2)}, 0.0);
+      if (b <= 0.0) continue;
+      vec3 c = pc[k].rgb;
+      c = mix(c, c * tone[k] / max(uPhotoMean[k], vec3(0.01)),
+        ${PHOTO_TINT.toFixed(2)});
+      vec3 n = pn[k].xyz * 2.0 - 1.0;
+      pColor += c * b;
+      // Image up (+green) is north, towards smaller tile y.
+      pGrad += vec2(-n.x, n.y) / max(n.z, 0.25) * b;
+      pRough += pc[k].a * b;
+      total += b;
+      if (k == PHOTO_FOREST) forestShare = b;
+    }
+    pColor /= total;
+    pGrad *= ${PHOTO_BUMP.toFixed(2)} / total;
+    pRough /= total;
+    forestShare /= total;
+    // Broad patches of light and shade, and the woods' tree crowns.
+    pColor *= 1.0 + 0.25 * nBig.x + 0.12 * nMid.x;
+    pColor *= mix(1.0, 0.85 + treeFade * (0.5 * trees.x - 0.2), forestShare);
+    pGrad += forestShare * treeFade * 0.08 * trees.yz;
+    ground = mix(ground, pColor, photoCover);
+    grad = mix(grad, pGrad, photoCover);
+    rough = mix(rough, pRough, photoCover);
+  }
 
   // Wet sand along the waterline.
   float wet = (1.0 - smoothstep(0.5, 0.64, landCov)) * octaveFade(2.0, px);

@@ -1,0 +1,10 @@
+{
+  "layers": [
+    { "key": "grass", "polyhaven": "aerial_grass_rock", "tiles": 8 },
+    { "key": "forest", "polyhaven": "forrest_ground_01", "tiles": 6 },
+    { "key": "dry", "polyhaven": "aerial_ground_rock", "tiles": 8 },
+    { "key": "rock", "polyhaven": "aerial_rocks_02", "tiles": 10 },
+    { "key": "snow", "polyhaven": "snow_02", "tiles": 10 },
+    { "key": "sand", "polyhaven": "aerial_beach_01", "tiles": 6 }
+  ]
+}

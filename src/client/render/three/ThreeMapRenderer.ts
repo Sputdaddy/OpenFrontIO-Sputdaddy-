@@ -6,8 +6,10 @@
  * 3D heightfield: terrain height comes from each tile's magnitude, the sea
  * floor deepens with distance to land, and the ground's surface detail,
  * territory fill and borders are painted onto it in the fragment shader from
- * the live tile state (TerrainMaterial). A translucent sea surface with
- * waves and surf covers the water (WaterMaterial).
+ * the live tile state (TerrainMaterial). Ground photos, where they have
+ * been downloaded, load in the background and replace the procedural detail
+ * (GroundPhotos). A translucent sea surface with waves and surf covers the
+ * water (WaterMaterial).
  *
  * The camera is orthographic, looks north and is fed by the same (centerX,
  * centerY, zoom) state as the WebGL2 Camera, plus a tilt away from straight
@@ -57,13 +59,18 @@ import type {
 } from "../types";
 import { buildCoastTextures } from "./CoastTextures";
 import { DEFAULT_TILT_DEGREES, type SurfaceElevation } from "./Elevation";
+import { loadGroundPhotos } from "./GroundPhotos";
 import {
   buildHeightGrid,
   buildReliefNormals,
   SurfaceHeights,
 } from "./Heightfield";
 import { LabelLayer } from "./LabelLayer";
-import { createTerrainMaterial, type TerrainUniforms } from "./TerrainMaterial";
+import {
+  applyGroundPhotos,
+  createTerrainMaterial,
+  type TerrainUniforms,
+} from "./TerrainMaterial";
 import { UnitModels } from "./UnitModels";
 import { createWaterMaterial } from "./WaterMaterial";
 
@@ -244,6 +251,17 @@ export class ThreeMapRenderer implements MapView {
     );
     this.terrainMat = terrainMaterial.material;
     this.uniforms = terrainMaterial.uniforms;
+    void loadGroundPhotos(this.renderer.capabilities.getMaxAnisotropy()).then(
+      (photos) => {
+        if (photos === null) return;
+        if (this.disposed) {
+          photos.color.dispose();
+          photos.normal.dispose();
+          return;
+        }
+        applyGroundPhotos(this.uniforms, photos);
+      },
+    );
 
     const terrainGeometry = buildHeightGrid(terrainBytes, this.mapW, this.mapH);
     this.surface = new SurfaceHeights(terrainGeometry, this.mapW, this.mapH);
@@ -694,6 +712,8 @@ export class ThreeMapRenderer implements MapView {
     this.kindTex.dispose();
     this.depthTex.dispose();
     this.railTex.dispose();
+    this.uniforms.uPhotoColor.value.dispose();
+    this.uniforms.uPhotoNormal.value.dispose();
     this.terrainMat.normalMap?.dispose();
     this.renderer.dispose();
   }
