@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { UnitType } from "../packages/engine-api/src/game/GameTypes";
 import {
   headingFor,
+  mapScale,
   modelFor,
+  modelSize,
   seaFacing,
   UNIT_MODELS,
 } from "../src/client/render/three/UnitModels";
@@ -54,5 +56,56 @@ describe("3D port placement", () => {
 
   it("leaves a port with no sea nearby to its default turn", () => {
     expect(seaFacing(() => false, 48, 20, 9)).toBeNull();
+  });
+});
+
+describe("3D model sizes", () => {
+  // Config.structureMinDist: the closest two structures can be.
+  const SPACING = 15;
+
+  it("keeps World-map sizes on the World map", () => {
+    expect(mapScale(2000, 1000)).toBeCloseTo(1);
+    expect(modelSize("warship", 1, 1, SPACING)).toBe(UNIT_MODELS.warship.size);
+  });
+
+  it("draws models bigger on bigger maps and smaller on smaller ones", () => {
+    const small = mapScale(1000, 1000);
+    const big = mapScale(2500, 2500);
+    expect(small).toBeLessThan(1);
+    expect(big).toBeGreaterThan(1);
+    expect(modelSize("warship", 1, small, SPACING)).toBeLessThan(
+      modelSize("warship", 1, big, SPACING),
+    );
+  });
+
+  it("stops scaling at the smallest and largest maps", () => {
+    expect(mapScale(512, 512)).toBe(mapScale(256, 256));
+    expect(mapScale(4744, 2628)).toBe(mapScale(8000, 8000));
+  });
+
+  it("never grows a structure into its neighbour", () => {
+    const scale = mapScale(8000, 8000);
+    for (const [key, spec] of Object.entries(UNIT_MODELS)) {
+      if (spec.kind !== "structure") continue;
+      // A square this wide, turned any way, fits in a circle SPACING across.
+      const size = modelSize(key, 1, scale, SPACING);
+      expect(size * Math.SQRT2, key).toBeLessThanOrEqual(SPACING + 1e-9);
+      expect(size, key).toBeGreaterThanOrEqual(spec.size);
+    }
+  });
+
+  it("still grows cities with their level", () => {
+    const scale = mapScale(8000, 8000);
+    expect(modelSize("city", 5, scale, SPACING)).toBeGreaterThan(
+      modelSize("city", 1, scale, SPACING),
+    );
+  });
+
+  it("keeps trains the size of the rails on every map", () => {
+    for (const scale of [mapScale(512, 512), mapScale(8000, 8000)]) {
+      expect(modelSize("train_car", 1, scale, SPACING)).toBe(
+        UNIT_MODELS.train_car.size,
+      );
+    }
   });
 });

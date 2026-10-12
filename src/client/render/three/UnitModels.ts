@@ -5,7 +5,8 @@
  * every unit as one instance per model part. Parts whose material name
  * starts with "Team" are multiplied by the owner's colour. Moving units
  * glide between their last and current tile over each tick and turn to face
- * where they're heading; ports turn to face the sea.
+ * where they're heading; ports turn to face the sea. Models are drawn bigger
+ * on bigger maps and smaller on smaller ones (mapScale).
  */
 
 import { assetUrl } from "@openfront/shared/AssetUrls";
@@ -49,7 +50,10 @@ interface ModelSpec {
   altitude?: number;
 }
 
-/** Every model, by key. Sizes match MAP_SIZES in build_models.py. */
+/**
+ * Every model, by key. Sizes are for the World map and match MAP_SIZES in
+ * build_models.py; other maps scale them (modelSize).
+ */
 export const UNIT_MODELS: Readonly<Record<string, ModelSpec>> = {
   city: { file: "models/city.glb", size: 9, kind: "structure" },
   missile_silo: { file: "models/missile_silo.glb", size: 9, kind: "structure" },
@@ -124,6 +128,14 @@ export function modelFor(
   return MODEL_BY_TYPE[unit.unitType] ?? null;
 }
 
+/**
+ * Model sizes are tuned on the World map (2000x1000). Other maps scale them
+ * by their size relative to it, so models take up about as much of the
+ * screen when the whole map is in view, within these bounds.
+ */
+const REFERENCE_MAP_SIZE = Math.sqrt(2000 * 1000);
+const MIN_MAP_SCALE = 0.6;
+const MAX_MAP_SCALE = 1.6;
 /** Cities grow a little with each level, up to this factor. */
 const MAX_LEVEL_SCALE = 1.4;
 const LEVEL_SCALE_STEP = 0.08;
@@ -154,6 +166,37 @@ const GHOST_OPACITY = 0.45;
 const BLACK = new THREE.Color(0, 0, 0);
 const GHOST_ORDER = 1;
 const MODEL_ORDER = 2;
+
+/** How much bigger than their World-map size models are on this map. */
+export function mapScale(width: number, height: number): number {
+  const scale = Math.sqrt(width * height) / REFERENCE_MAP_SIZE;
+  return Math.min(MAX_MAP_SCALE, Math.max(MIN_MAP_SCALE, scale));
+}
+
+/**
+ * A model's size in tiles on a map with this scale. Structures can stand
+ * structureSpacing tiles apart in any direction, so they scale up only as
+ * far as two neighbours turned any way still can't overlap; cities then
+ * grow with their level. Trains keep their size, to fit the rails and the
+ * gap between cars.
+ */
+export function modelSize(
+  key: string,
+  level: number,
+  scale: number,
+  structureSpacing: number,
+): number {
+  const spec = UNIT_MODELS[key];
+  if (spec.kind === "train") return spec.size;
+  let size = spec.size * scale;
+  if (spec.kind === "structure") {
+    size = Math.min(size, structureSpacing / Math.SQRT2);
+  }
+  if (key === "city") {
+    size *= Math.min(MAX_LEVEL_SCALE, 1 + (level - 1) * LEVEL_SCALE_STEP);
+  }
+  return size;
+}
 
 /** Heading (radians about +Y) that points a model's bow along (dx, dy). */
 export function headingFor(dx: number, dy: number): number {
@@ -375,16 +418,20 @@ export class UnitModels {
   private readonly rotation = new THREE.Quaternion();
   private readonly scale = new THREE.Vector3();
   private readonly color = new THREE.Color();
+  private readonly mapScale: number;
   private static readonly UP = new THREE.Vector3(0, 1, 0);
 
   constructor(
     scene: THREE.Scene,
     renderer: THREE.WebGLRenderer,
     private readonly mapW: number,
+    mapH: number,
+    private readonly structureSpacing: number,
     private readonly msPerTick: number,
     private readonly ownerColor: (ownerID: number, out: THREE.Color) => void,
     private readonly isWater: (x: number, y: number) => boolean,
   ) {
+    this.mapScale = mapScale(mapW, mapH);
     scene.add(this.group);
     // A soft studio environment so the models' metal and glass have
     // something to reflect. Only the models use it, not the terrain.
@@ -532,16 +579,15 @@ export class UnitModels {
       for (const s of list) {
         const x = s.fromX + (s.toX - s.fromX) * t + 0.5;
         const y = s.fromY + (s.toY - s.fromY) * t + 0.5;
-        let size = spec.size;
+        const size = modelSize(
+          key,
+          s.unit.level,
+          this.mapScale,
+          this.structureSpacing,
+        );
         let angle: number;
         let ground: number;
         if (spec.kind === "structure") {
-          if (key === "city") {
-            size *= Math.min(
-              MAX_LEVEL_SCALE,
-              1 + (s.unit.level - 1) * LEVEL_SCALE_STEP,
-            );
-          }
           if (key === "port") {
             s.facing ??=
               seaFacing(this.isWater, x, y, size) ?? quarterTurn(s.unit.id);
@@ -556,7 +602,7 @@ export class UnitModels {
           if (spec.kind === "ship") ground = 0;
           else if (spec.kind === "train")
             ground = Math.max(heightAt(x, y), BRIDGE_DECK);
-          else ground = spec.altitude ?? 0;
+          else ground = (spec.altitude ?? 0) * this.mapScale;
         }
         this.position.set(x, ground, y);
         this.rotation.setFromAxisAngle(UnitModels.UP, angle);

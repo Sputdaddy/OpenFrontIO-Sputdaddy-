@@ -424,6 +424,8 @@ export class ThreeMapRenderer implements MapView {
       this.scene,
       this.renderer,
       this.mapW,
+      this.mapH,
+      config.structureMinDist(),
       config.msPerTick(),
       (ownerID, out) => this.ownerColor(ownerID, out),
       (x, y) => {
