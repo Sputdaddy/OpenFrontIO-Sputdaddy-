@@ -96,10 +96,27 @@ describe("3D model sizes", () => {
     }
   });
 
-  it("still grows cities with their level", () => {
-    const scale = mapScale(8000, 8000);
-    expect(modelSize("city", 5, scale, SPACING)).toBeGreaterThan(
-      modelSize("city", 1, scale, SPACING),
+  it("grows a city a bit with each level stacked on it", () => {
+    const scale = mapScale(2000, 1000);
+    const city = (level: number) => modelSize("city", level, scale, SPACING);
+    for (let level = 2; level <= 20; level++) {
+      expect(city(level), `level ${level}`).toBeGreaterThan(city(level - 1));
+    }
+    // Noticeably at first, then a little less each time.
+    expect(city(2) / city(1)).toBeGreaterThan(1.1);
+    expect(city(10) - city(9)).toBeLessThan(city(2) - city(1));
+  });
+
+  it("never grows a city into a neighbour beside it", () => {
+    for (const scale of [mapScale(2000, 1000), mapScale(8000, 8000)]) {
+      expect(modelSize("city", 100, scale, SPACING)).toBeLessThan(SPACING);
+    }
+  });
+
+  it("grows only cities with their level", () => {
+    const scale = mapScale(2000, 1000);
+    expect(modelSize("port", 5, scale, SPACING)).toBe(
+      modelSize("port", 1, scale, SPACING),
     );
   });
 

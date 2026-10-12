@@ -138,9 +138,15 @@ const MODEL_SCALE = 0.7;
 const REFERENCE_MAP_SIZE = Math.sqrt(2000 * 1000);
 const MIN_MAP_SCALE = 0.6;
 const MAX_MAP_SCALE = 1.6;
-/** Cities grow a little with each level, up to this factor. */
-const MAX_LEVEL_SCALE = 1.4;
-const LEVEL_SCALE_STEP = 0.08;
+/**
+ * Each level stacked on a city makes it a bit bigger, a little less each
+ * time: level 2 is 13% bigger, level 5 about 43%, level 10 about 69%,
+ * approaching 90%. A city never grows wider than CITY_GAP short of the
+ * structure spacing, so it can't reach a neighbour beside it.
+ */
+const LEVEL_GROWTH = 0.9;
+const LEVEL_GROWTH_DECAY = 0.85;
+const CITY_GAP = 1;
 /** Structures being built are drawn this fraction of their full height. */
 const CONSTRUCTION_HEIGHT = 0.35;
 /** How fast ships turn toward their heading, per second. */
@@ -179,8 +185,8 @@ export function mapScale(width: number, height: number): number {
  * A model's size in tiles on a map with this scale. Structures can stand
  * structureSpacing tiles apart in any direction, so they scale up only as
  * far as two neighbours turned any way still can't overlap; cities then
- * grow with their level. Trains keep their size, to fit the rails and the
- * gap between cars.
+ * grow with each level stacked on them. Trains keep their size, to fit the
+ * rails and the gap between cars.
  */
 export function modelSize(
   key: string,
@@ -194,8 +200,9 @@ export function modelSize(
   if (spec.kind === "structure") {
     size = Math.min(size, structureSpacing / Math.SQRT2);
   }
-  if (key === "city") {
-    size *= Math.min(MAX_LEVEL_SCALE, 1 + (level - 1) * LEVEL_SCALE_STEP);
+  if (key === "city" && level > 1) {
+    size *= 1 + LEVEL_GROWTH * (1 - LEVEL_GROWTH_DECAY ** (level - 1));
+    size = Math.min(size, structureSpacing - CITY_GAP);
   }
   return size;
 }
