@@ -4,9 +4,10 @@
  * A drop-in replacement for MapRenderer (it implements the same MapView
  * surface), selected by the "3D map" user setting. It draws the map as a lit
  * 3D heightfield: terrain height comes from each tile's magnitude, the sea
- * floor deepens with distance to land, and territory fill and borders are
- * composited onto the terrain in the fragment shader from the live tile
- * state, the same way TerritoryPass does it.
+ * floor deepens with distance to land, and the ground's surface detail,
+ * territory fill and borders are painted onto it in the fragment shader from
+ * the live tile state (TerrainMaterial). A translucent sea surface with
+ * waves and surf covers the water (WaterMaterial).
  *
  * The camera is orthographic, looks north and is fed by the same (centerX,
  * centerY, zoom) state as the WebGL2 Camera, plus a tilt away from straight
@@ -62,7 +63,9 @@ import {
   SurfaceHeights,
 } from "./Heightfield";
 import { LabelLayer } from "./LabelLayer";
+import { createTerrainMaterial, type TerrainUniforms } from "./TerrainMaterial";
 import { UnitModels } from "./UnitModels";
+import { createWaterMaterial } from "./WaterMaterial";
 
 const PALETTE_SIZE = getPaletteSize();
 // Camera distance from the point it looks at, beyond what the view needs.
@@ -100,6 +103,9 @@ export class ThreeMapRenderer implements MapView {
   private readonly terrainTex: THREE.DataTexture;
   private readonly waterTex: THREE.DataTexture;
   private readonly landMaskTex: THREE.DataTexture;
+  /** Kind of ground and water depth per tile (see CoastTextures). */
+  private readonly kindTex: THREE.DataTexture;
+  private readonly depthTex: THREE.DataTexture;
   /** Rail type per tile, 0 for none (as RailroadPass reads it). */
   private readonly railData: Uint8Array;
   private readonly railTex: THREE.DataTexture;
@@ -111,15 +117,9 @@ export class ThreeMapRenderer implements MapView {
   private readonly gl: WebGL2RenderingContext;
   /** How the tilted camera draws raised ground; TransformHandler uses it. */
   readonly elevation: SurfaceElevation;
-  private readonly uniforms = {
-    uOwner: { value: null as THREE.Texture | null },
-    uPalette: { value: null as THREE.Texture | null },
-    uMapSize: { value: new THREE.Vector2() },
-    uHighlight: { value: 0 },
-    uWater: { value: null as THREE.Texture | null },
-    uLand: { value: null as THREE.Texture | null },
-    uRail: { value: null as THREE.Texture | null },
-  };
+  private readonly uniforms: TerrainUniforms;
+  /** Seconds, for the shaders' moving water. */
+  private readonly time = { value: 0 };
 
   private resizeObs: ResizeObserver | null = null;
   private animId: number | null = null;
@@ -206,24 +206,11 @@ export class ThreeMapRenderer implements MapView {
     this.terrainTex.colorSpace = THREE.SRGBColorSpace;
     this.waterTex = smooth(this.dataTexture(coast.water, this.mapW, this.mapH));
     this.waterTex.colorSpace = THREE.SRGBColorSpace;
-    this.landMaskTex = new THREE.DataTexture(
-      coast.mask,
-      this.mapW,
-      this.mapH,
-      THREE.RedFormat,
-    );
-    this.landMaskTex.unpackAlignment = 1;
-    this.landMaskTex.needsUpdate = true;
-    smooth(this.landMaskTex);
+    this.landMaskTex = smooth(this.byteTexture(coast.mask));
+    this.kindTex = smooth(this.dataTexture(coast.kind, this.mapW, this.mapH));
+    this.depthTex = smooth(this.byteTexture(coast.depth));
     this.railData = new Uint8Array(n);
-    this.railTex = new THREE.DataTexture(
-      this.railData,
-      this.mapW,
-      this.mapH,
-      THREE.RedFormat,
-    );
-    this.railTex.unpackAlignment = 1;
-    this.railTex.needsUpdate = true;
+    this.railTex = this.byteTexture(this.railData);
 
     const normalTex = this.dataTexture(
       buildReliefNormals(terrainBytes, this.mapW, this.mapH),
@@ -234,159 +221,29 @@ export class ThreeMapRenderer implements MapView {
     normalTex.minFilter = THREE.LinearMipmapLinearFilter;
     normalTex.generateMipmaps = true;
 
-    this.uniforms.uOwner.value = this.ownerTex;
-    this.uniforms.uPalette.value = this.paletteTex;
-    this.uniforms.uMapSize.value.set(this.mapW, this.mapH);
-    this.uniforms.uWater.value = this.waterTex;
-    this.uniforms.uLand.value = this.landMaskTex;
-    this.uniforms.uRail.value = this.railTex;
-
-    this.terrainMat = new THREE.MeshStandardMaterial({
-      map: this.terrainTex,
-      normalMap: normalTex,
-      normalScale: new THREE.Vector2(0.8, 0.8),
-      roughness: 0.92,
-      metalness: 0,
-    });
-    this.terrainMat.onBeforeCompile = (shader) => {
-      Object.assign(shader.uniforms, this.uniforms);
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          "#include <common>",
-          `#include <common>
-          varying float vHeight;`,
-        )
-        .replace(
-          "#include <begin_vertex>",
-          `#include <begin_vertex>
-          vHeight = transformed.y;`,
-        );
-      shader.fragmentShader = shader.fragmentShader
-        // The seabed takes no shadows: seen through the water they land far
-        // from what casts them, and ships look like they're floating.
-        .replace(
-          "#include <lights_fragment_begin>",
-          THREE.ShaderChunk.lights_fragment_begin
-            .split("receiveShadow")
-            .join("(receiveShadow && vHeight > -0.05)"),
-        )
-        .replace(
-          "#include <common>",
-          `#include <common>
-          varying float vHeight;
-          uniform sampler2D uOwner;
-          uniform sampler2D uPalette;
-          uniform vec2 uMapSize;
-          uniform float uHighlight;
-          uniform sampler2D uWater;
-          uniform sampler2D uLand;
-          uniform sampler2D uRail;
-          float segmentDistance(vec2 p, vec2 a, vec2 b, out float along) {
-            vec2 ab = b - a;
-            float t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
-            along = dot(a + ab * t, abs(normalize(ab)));
-            return length(p - a - ab * t);
-          }
-          // Distance from p (in the tile) to a rail's centreline: straight
-          // across (1 vertical, 2 horizontal) or a corner joining the top or
-          // bottom edge to the left or right one (3-6). along runs along
-          // the track, for the sleepers.
-          float railDistance(uint rail, vec2 p, out float along) {
-            if (rail == 1u) return segmentDistance(p, vec2(0.5, 0.0), vec2(0.5, 1.0), along);
-            if (rail == 2u) return segmentDistance(p, vec2(0.0, 0.5), vec2(1.0, 0.5), along);
-            vec2 c = vec2(0.5);
-            vec2 e1 = vec2(0.5, (rail == 3u || rail == 4u) ? 0.0 : 1.0);
-            vec2 e2 = vec2((rail == 3u || rail == 5u) ? 0.0 : 1.0, 0.5);
-            float a1;
-            float a2;
-            float d1 = segmentDistance(p, c, e1, a1);
-            float d2 = segmentDistance(p, c, e2, a2);
-            along = d1 < d2 ? a1 : a2;
-            return min(d1, d2);
-          }
-          uvec2 tileAt(ivec2 t) {
-            t = clamp(t, ivec2(0), ivec2(uMapSize) - 1);
-            vec4 o = texelFetch(uOwner, t, 0);
-            uint lo = uint(o.r * 255.0 + 0.5);
-            uint hi = uint(o.g * 255.0 + 0.5);
-            return uvec2(lo | ((hi & 15u) << 8), hi);
-          }`,
-        )
-        .replace(
-          "#include <map_fragment>",
-          `#include <map_fragment>
-          {
-            // Coast: land colours where the filtered land mask is above one
-            // half, water colours below, antialiased across the contour.
-            float landCov = texture(uLand, vMapUv).r;
-            float aa = max(fwidth(landCov), 1e-3);
-            float landMix = smoothstep(0.5 - aa, 0.5 + aa, landCov);
-            diffuseColor.rgb = mix(texture(uWater, vMapUv).rgb, diffuseColor.rgb, landMix);
-
-            // Territory: the owner with the most bilinear weight among the
-            // four nearest tiles, so borders cut tile corners instead of
-            // stepping. That weight falls to one half at the border line,
-            // which is drawn as a band just inside it.
-            vec2 tp = vMapUv * uMapSize - 0.5;
-            ivec2 t0 = ivec2(floor(tp));
-            vec2 f = tp - vec2(t0);
-            uint o[4] = uint[4](
-              tileAt(t0).x, tileAt(t0 + ivec2(1, 0)).x,
-              tileAt(t0 + ivec2(0, 1)).x, tileAt(t0 + ivec2(1, 1)).x);
-            float w[4] = float[4](
-              (1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y),
-              (1.0 - f.x) * f.y, f.x * f.y);
-            uint own = o[0];
-            float cov = -1.0;
-            for (int i = 0; i < 4; i++) {
-              float c = 0.0;
-              for (int j = 0; j < 4; j++) c += o[j] == o[i] ? w[j] : 0.0;
-              if (c > cov) {
-                cov = c;
-                own = o[i];
-              }
-            }
-            uvec2 s = tileAt(ivec2(floor(vMapUv * uMapSize)));
-            if ((s.y & 32u) != 0u) {
-              diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.09, 0.13, 0.03), 0.6);
-            }
-            if (own != 0u) {
-              vec4 fill = texelFetch(uPalette, ivec2(int(own), 0), 0);
-              vec4 edge = texelFetch(uPalette, ivec2(int(own), 1), 0);
-              float hl = float(own) == uHighlight ? 1.0 : 0.0;
-              float a = clamp(fill.a + hl * 0.2, 0.0, 1.0);
-              vec3 filled = mix(diffuseColor.rgb, pow(fill.rgb, vec3(2.2)), a);
-              // Border band: at least a couple of pixels when zoomed out.
-              float tilesPerPixel = max(fwidth(tp.x), fwidth(tp.y));
-              float band = clamp(2.0 * tilesPerPixel, 0.3, 0.5);
-              float soft = max(fwidth(cov), 1e-3);
-              float border = 1.0 - smoothstep(0.5 + band - soft, 0.5 + band + soft, cov);
-              diffuseColor.rgb = mix(filled, pow(edge.rgb, vec3(2.2)), border);
-            }
-
-            // Railroads: ballast, sleepers and two steel rails up close; a
-            // plain dark line once a tile is only a few pixels across.
-            ivec2 rt = ivec2(floor(vMapUv * uMapSize));
-            uint rail = uint(texelFetch(uRail, rt, 0).r * 255.0 + 0.5);
-            if (rail != 0u && rail <= 6u) {
-              float along;
-              float d = railDistance(rail, vMapUv * uMapSize - vec2(rt), along);
-              float px = max(fwidth(tp.x), fwidth(tp.y));
-              float detail = 1.0 - smoothstep(0.1, 0.25, px);
-              vec3 c = diffuseColor.rgb;
-              float ballast = 1.0 - smoothstep(0.3 - px, 0.3 + px, d);
-              c = mix(c, vec3(0.25, 0.23, 0.2), ballast * detail);
-              float ties = step(fract(along * 4.0), 0.4)
-                * (1.0 - smoothstep(0.24 - px, 0.24 + px, d));
-              c = mix(c, vec3(0.07, 0.05, 0.04), ties * detail);
-              float steel = 1.0 - smoothstep(0.025, 0.025 + px, abs(d - 0.13));
-              c = mix(c, vec3(0.33, 0.35, 0.38), steel * detail);
-              float line = 1.0 - smoothstep(0.2 - px, 0.2 + px, d);
-              diffuseColor.rgb = mix(c, vec3(0.04), line * (1.0 - detail));
-            }
-          }`,
-        );
-    };
+    const ocean = hexToRgb(settings.terrain.oceanColor) ?? [71, 133, 181];
+    const oceanColor = new THREE.Color(
+      `rgb(${ocean[0]},${ocean[1]},${ocean[2]})`,
+    );
+    const terrainMaterial = createTerrainMaterial(
+      {
+        owner: this.ownerTex,
+        palette: this.paletteTex,
+        land: this.terrainTex,
+        water: this.waterTex,
+        landMask: this.landMaskTex,
+        kind: this.kindTex,
+        depth: this.depthTex,
+        rail: this.railTex,
+        relief: normalTex,
+      },
+      this.mapW,
+      this.mapH,
+      this.time,
+      oceanColor,
+    );
+    this.terrainMat = terrainMaterial.material;
+    this.uniforms = terrainMaterial.uniforms;
 
     const terrainGeometry = buildHeightGrid(terrainBytes, this.mapW, this.mapH);
     this.surface = new SurfaceHeights(terrainGeometry, this.mapW, this.mapH);
@@ -400,16 +257,15 @@ export class ThreeMapRenderer implements MapView {
     terrain.receiveShadow = true;
     this.scene.add(terrain);
 
-    const ocean = hexToRgb(settings.terrain.oceanColor) ?? [71, 133, 181];
     const water = new THREE.Mesh(
       new THREE.PlaneGeometry(this.mapW, this.mapH),
-      new THREE.MeshStandardMaterial({
-        color: new THREE.Color(`rgb(${ocean[0]},${ocean[1]},${ocean[2]})`),
-        roughness: 0.2,
-        metalness: 0.1,
-        transparent: true,
-        opacity: 0.55,
-      }),
+      createWaterMaterial(
+        oceanColor,
+        { landMask: this.landMaskTex, depth: this.depthTex },
+        this.mapW,
+        this.mapH,
+        this.time,
+      ),
     );
     water.rotation.x = -Math.PI / 2;
     water.position.set(this.mapW / 2, 0, this.mapH / 2);
@@ -482,6 +338,19 @@ export class ThreeMapRenderer implements MapView {
     return tex;
   }
 
+  /** A one-byte-per-tile texture. */
+  private byteTexture(data: Uint8Array): THREE.DataTexture {
+    const tex = new THREE.DataTexture(
+      data,
+      this.mapW,
+      this.mapH,
+      THREE.RedFormat,
+    );
+    tex.unpackAlignment = 1;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
   private terrainColors(): TerrainColorOverrides {
     const t = this.settings.terrain;
     return {
@@ -502,6 +371,7 @@ export class ThreeMapRenderer implements MapView {
 
   private draw(): void {
     this.flushOwnerRows();
+    this.time.value = performance.now() / 1000;
     const halfW = this.canvas.width / (2 * this.camZoom);
     const halfH = this.canvas.height / (2 * this.camZoom);
     // Looking north from the south, tilted away from straight down.
@@ -690,6 +560,8 @@ export class ThreeMapRenderer implements MapView {
       [this.terrainTex, coast.land],
       [this.waterTex, coast.water],
       [this.landMaskTex, coast.mask],
+      [this.kindTex, coast.kind],
+      [this.depthTex, coast.depth],
     ];
     for (const [tex, data] of textures) {
       (tex.image as { data: Uint8Array }).data.set(data);
@@ -819,6 +691,8 @@ export class ThreeMapRenderer implements MapView {
     this.terrainTex.dispose();
     this.waterTex.dispose();
     this.landMaskTex.dispose();
+    this.kindTex.dispose();
+    this.depthTex.dispose();
     this.railTex.dispose();
     this.terrainMat.normalMap?.dispose();
     this.renderer.dispose();

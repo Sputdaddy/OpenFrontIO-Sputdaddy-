@@ -31,6 +31,13 @@ const MOUNTAIN_START = 19;
 const MOUNTAIN_RISE = 0.55;
 // Impassable terrain reads as high ground rather than the tallest peaks.
 const IMPASSABLE_AS = 22;
+// Inland vertices stay at least this high, open-water ones this deep.
+const COAST_LAND_MIN = 0.1;
+const COAST_WATER_MAX = -0.9;
+// Near the coast a vertex's height follows its land coverage, rising this
+// much per unit of coverage, so the mesh meets sea level where the coast is
+// drawn and the ground under the water's edge isn't seen through it.
+const COAST_SLOPE = 1.6;
 
 // Scattered hills: at most one per HILL_CELL x HILL_CELL tiles.
 const HILL_CELL = 48;
@@ -80,8 +87,9 @@ export function gridStep(mapW: number, mapH: number): number {
 
 /**
  * The terrain mesh: a regular grid every `gridStep` tiles, each vertex at the
- * smoothed average height of the tiles around it. Coastlines stay on the right
- * side of sea level so land never sinks under the water plane.
+ * smoothed average height of the tiles around it. Near the coast, heights
+ * follow the land coverage (landCoverageAtCorner) so the mesh crosses sea
+ * level along the drawn coastline.
  */
 export function buildHeightGrid(
   terrain: Uint8Array,
@@ -138,13 +146,26 @@ export function buildHeightGrid(
   const uvs = new Float32Array(gw * gh * 2);
   for (let j = 0; j < gh; j++) {
     const wy = Math.min(j * step, mapH);
-    const ty = Math.min(mapH - 1, Math.floor(wy));
     for (let i = 0; i < gw; i++) {
       const wx = Math.min(i * step, mapW);
-      const tx = Math.min(mapW - 1, Math.floor(wx));
       const g = j * gw + i;
-      const land = (terrain[ty * mapW + tx] & LAND_BIT) !== 0;
-      const h = land ? Math.max(heights[g], 0.4) : Math.min(heights[g], -0.3);
+      const cover = landCoverageAtCorner(terrain, mapW, mapH, wx, wy);
+      const coast = COAST_SLOPE * (cover - 0.5);
+      const h =
+        cover > 0.5
+          ? lerp(
+              coast,
+              Math.max(heights[g], COAST_LAND_MIN),
+              smoothstep(0.5, 1, cover),
+            )
+          : Math.min(
+              lerp(
+                coast,
+                Math.min(heights[g], COAST_WATER_MAX),
+                smoothstep(0.5, 0, cover),
+              ),
+              -0.02,
+            );
       positions[g * 3] = wx;
       positions[g * 3 + 1] = h;
       positions[g * 3 + 2] = wy;
@@ -177,6 +198,39 @@ export function buildHeightGrid(
   geo.setIndex(new BufferAttribute(index, 1));
   geo.computeVertexNormals();
   return geo;
+}
+
+// Cubic B-spline weights of the four tiles around a tile corner.
+const CORNER_WEIGHTS = [1 / 48, 23 / 48, 23 / 48, 1 / 48] as const;
+
+/**
+ * How much of the map is land at the tile corner (x, y), read the way the
+ * shaders read the land mask (smoothMask in ShaderLib): a cubic B-spline,
+ * kept within a quarter of the plain average of the four tiles at the
+ * corner. The drawn coastline is where this crosses one half.
+ */
+export function landCoverageAtCorner(
+  terrain: Uint8Array,
+  mapW: number,
+  mapH: number,
+  x: number,
+  y: number,
+): number {
+  const land = (tx: number, ty: number): number => {
+    const cx = tx < 0 ? 0 : tx >= mapW ? mapW - 1 : tx;
+    const cy = ty < 0 ? 0 : ty >= mapH ? mapH - 1 : ty;
+    return terrain[cy * mapW + cx] & LAND_BIT ? 1 : 0;
+  };
+  let spline = 0;
+  for (let j = 0; j < 4; j++) {
+    for (let i = 0; i < 4; i++) {
+      spline +=
+        CORNER_WEIGHTS[i] * CORNER_WEIGHTS[j] * land(x - 2 + i, y - 2 + j);
+    }
+  }
+  const average =
+    (land(x - 1, y - 1) + land(x, y - 1) + land(x - 1, y) + land(x, y)) / 4;
+  return clamp(spline, average - 0.25, average + 0.25);
 }
 
 /**

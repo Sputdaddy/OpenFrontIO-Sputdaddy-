@@ -4,6 +4,7 @@ import {
   buildReliefNormals,
   gridStep,
   hillsAt,
+  landCoverageAtCorner,
   SurfaceHeights,
   tileHeight,
 } from "../src/client/render/three/Heightfield";
@@ -129,5 +130,54 @@ describe("Three.js heightfield", () => {
     expect(surface.maxHeight).toBeGreaterThan(0);
     // Off the map it holds the edge height.
     expect(surface.at(-5, -5)).toBeCloseTo(surface.at(0, 0), 5);
+  });
+
+  it("reads land coverage at tile corners the way the shaders do", () => {
+    const w = 8;
+    const h = 8;
+    // Land in the west half, plus a one-tile island at (6, 2).
+    const terrain = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        terrain[y * w + x] = x < 4 ? land(5) : water(1);
+      }
+    }
+    terrain[2 * w + 6] = land(5);
+    const cov = (x: number, y: number) =>
+      landCoverageAtCorner(terrain, w, h, x, y);
+    // A straight coast is crossed half way, on the tile edge.
+    expect(cov(4, 5)).toBeCloseTo(0.5, 5);
+    expect(cov(3, 5)).toBeGreaterThan(0.5);
+    expect(cov(5, 5)).toBeLessThan(0.5);
+    expect(cov(1, 5)).toBeCloseTo(1, 9);
+    expect(cov(7, 6)).toBeCloseTo(0, 9);
+    // The island's corners stay under water: it is drawn inside them.
+    for (const [x, y] of [
+      [6, 2],
+      [7, 2],
+      [6, 3],
+      [7, 3],
+    ]) {
+      expect(cov(x, y)).toBeGreaterThan(0);
+      expect(cov(x, y)).toBeLessThan(0.5);
+    }
+  });
+
+  it("keeps mesh vertices on the side of the drawn coastline they are on", () => {
+    const w = 16;
+    const h = 16;
+    // A diagonal coast: land below the line x + y = 16.
+    const terrain = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        terrain[y * w + x] = x + y < 16 ? land(3) : water(2);
+      }
+    }
+    const pos = buildHeightGrid(terrain, w, h).getAttribute("position");
+    for (let v = 0; v < pos.count; v++) {
+      const c = landCoverageAtCorner(terrain, w, h, pos.getX(v), pos.getZ(v));
+      if (c > 0.5) expect(pos.getY(v)).toBeGreaterThan(0);
+      else expect(pos.getY(v)).toBeLessThan(0);
+    }
   });
 });
