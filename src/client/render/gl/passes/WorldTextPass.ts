@@ -8,7 +8,8 @@
  */
 
 import type { Config } from "@openfront/engine-lib/configuration/Config";
-import type { BonusEvent, ConquestFx } from "../../types";
+import { translateText } from "../../../Utils";
+import type { BonusEvent, ConquestFx, GhostPreviewData } from "../../types";
 import type { RenderSettings } from "../RenderSettings";
 import { renderDpr } from "../utils/Dpr";
 import { createProgram } from "../utils/GlUtils";
@@ -146,6 +147,12 @@ export class WorldTextPass {
 
   // Map width for tile→x/y conversion
   private mapW = 0;
+
+  /**
+   * Tiles to raise a label up the screen, given its anchor: the 3D map lifts
+   * labels onto the raised ground under them. Unset on the 2D map.
+   */
+  private anchorLift: ((x: number, y: number) => number) | null = null;
 
   // Pluggable time source (same pattern as FxPass)
   private timeFn: () => number = () => performance.now();
@@ -322,8 +329,37 @@ export class WorldTextPass {
   }
 
   /**
+   * Show the build-cost label (and the upgrade multiplier badge, e.g. x5)
+   * for a ghost structure preview; `null` clears it.
+   */
+  setGhostPreview(data: GhostPreviewData | null): void {
+    // The multiplier badge (x5) rides on the cost label but must show even
+    // when there is no cost line — e.g. infinite gold (cost 0) or the
+    // cursor-cost-label setting turned off.
+    const topText =
+      data?.multiplier && data.multiplier > 1
+        ? translateText("build_menu.upgrade_amount", {
+            amount: data.multiplier.toString(),
+          })
+        : undefined;
+    const showCost = data !== null && data.showCost && data.cost > 0;
+    this.setGhostCostLabel(
+      data && (showCost || topText !== undefined)
+        ? {
+            tileX: data.tileX,
+            tileY: data.tileY,
+            cost: showCost ? data.cost : 0,
+            canAfford: data.canAfford,
+            canPlace: data.canBuild || data.canUpgrade,
+            topText,
+          }
+        : null,
+    );
+  }
+
+  /**
    * Set or clear the ghost-cost label rendered under the build cursor.
-   * `null` clears it. Called from Renderer.updateGhostPreview.
+   * `null` clears it.
    */
   setGhostCostLabel(
     label: {
@@ -375,6 +411,16 @@ export class WorldTextPass {
     this.attackTroopLabels = labels;
   }
 
+  /** Raise labels by `lift(x, y)` tiles up the screen (null = don't). */
+  setAnchorLift(lift: ((x: number, y: number) => number) | null): void {
+    this.anchorLift = lift;
+  }
+
+  /** Tiles to raise the label anchored at tile (x, y); 0 on the 2D map. */
+  private liftAt(x: number, y: number): number {
+    return this.anchorLift === null ? 0 : this.anchorLift(x + 0.5, y + 0.5);
+  }
+
   // -------------------------------------------------------------------------
   // Tick — cull expired, rebuild instance buffer
   // -------------------------------------------------------------------------
@@ -414,9 +460,9 @@ export class WorldTextPass {
 
       // Rise animation: move upward over time
       const riseY =
-        popup.riseSpeed > 0
+        (popup.riseSpeed > 0
           ? popup.y - (elapsed / 1000) * popup.riseSpeed
-          : popup.y;
+          : popup.y) - this.liftAt(popup.x, popup.y);
 
       layoutString(
         popup.text,
@@ -454,6 +500,7 @@ export class WorldTextPass {
     const attackScale =
       (ATTACK_LABEL_SCREEN_SCALE * dpr) / Math.max(zoom, 0.0001);
     for (const label of this.attackTroopLabels) {
+      const labelY = label.y - this.liftAt(label.x, label.y);
       layoutString(
         label.text,
         this.glyph,
@@ -468,7 +515,7 @@ export class WorldTextPass {
 
         const off = count * FLOATS_PER_INSTANCE;
         this.instanceData[off + 0] = label.x;
-        this.instanceData[off + 1] = label.y;
+        this.instanceData[off + 1] = labelY;
         this.instanceData[off + 2] = this.cursors[i];
         this.instanceData[off + 3] = this.charCodes[i];
         this.instanceData[off + 4] = 1;
@@ -489,11 +536,12 @@ export class WorldTextPass {
     if (label) {
       const invZoom = 1 / Math.max(zoom, 0.0001);
       const ghostScale = this.settings.ghostCost.screenScale * dpr * invZoom;
+      const anchorY = label.y - this.liftAt(label.x, label.y);
       const ghostY =
-        label.y + this.settings.ghostCost.screenYOffset * dpr * invZoom;
+        anchorY + this.settings.ghostCost.screenYOffset * dpr * invZoom;
 
       if (label.topText) {
-        const topY = label.y - 30 * dpr * invZoom;
+        const topY = anchorY - 30 * dpr * invZoom;
         layoutString(
           label.topText,
           this.glyph,
