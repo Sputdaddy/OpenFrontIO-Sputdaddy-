@@ -443,6 +443,17 @@ export class HelpModal extends BaseModal {
                   <tr class="hover:bg-white/5 transition-colors">
                     <td class="py-3 ps-4 border-b border-white/5">
                       <div class="flex flex-wrap gap-2">
+                        ${this.renderKey(keybinds.tiltDown)}
+                        ${this.renderKey(keybinds.tiltUp)}
+                      </div>
+                    </td>
+                    <td class="py-3 border-b border-white/5 text-white/70">
+                      ${translateText("help_modal.action_tilt_camera")}
+                    </td>
+                  </tr>
+                  <tr class="hover:bg-white/5 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5">
+                      <div class="flex flex-wrap gap-2">
                         ${this.renderKey(keybinds.attackRatioDown)}
                         ${this.renderKey(keybinds.attackRatioUp)}
                       </div>

@@ -595,7 +595,7 @@ function mountWebGLFrameLoop(
       transformHandler.offsetY +
       mapHeight / 2 +
       (cachedCanvasH - mapHeight) / (2 * scale);
-    view.setCameraState(centerX, centerY, scale * dpr);
+    view.setCameraState(centerX, centerY, scale * dpr, transformHandler.tilt());
     // Invoke the WebGL renderer's frame callback synchronously, with the just-
     // updated camera state. The callback re-arms itself via captureRaf, so
     // we'll get a fresh callback ready for the next canvas2D frame.
@@ -867,7 +867,8 @@ async function createClientGame(
       view,
       mapLayerController,
     );
-    if (ThreeRenderer !== null && view instanceof ThreeRenderer) {
+    const is3D = ThreeRenderer !== null && view instanceof ThreeRenderer;
+    if (is3D) {
       gameRenderer.transformHandler.setElevation(view.elevation);
     }
 
@@ -906,7 +907,13 @@ async function createClientGame(
       clientID,
       eventBus,
       gameRenderer,
-      new InputHandler(gameView, gameRenderer.uiState, inputOverlay, eventBus),
+      new InputHandler(
+        gameView,
+        gameRenderer.uiState,
+        inputOverlay,
+        eventBus,
+        is3D,
+      ),
       transport,
       worker,
       gameView,

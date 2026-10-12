@@ -3,6 +3,7 @@ import { EventBus } from "@openfront/shared/EventBus";
 import {
   AlternateViewEvent,
   AutoUpgradeEvent,
+  CameraTiltEvent,
   CloseViewEvent,
   ConfirmGhostStructureEvent,
   ContextMenuEvent,
@@ -2197,6 +2198,146 @@ describe("InputHandler teardown (OPE-411)", () => {
       expect(emit).not.toHaveBeenCalled();
     } finally {
       handler.destroy();
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("Camera tilt on the 3D map", () => {
+  let inputHandler: InputHandler;
+  let eventBus: EventBus;
+
+  const makeHandler = (canTilt: boolean) =>
+    new InputHandler(
+      {
+        inSpawnPhase: () => false,
+        myPlayer: () => ({ isAlive: () => true }),
+      } as unknown as GameView,
+      {
+        attackRatio: 20,
+        ghostStructure: null,
+        rocketDirectionUp: true,
+        upgradeMultiplier: 1,
+      },
+      document.createElement("canvas"),
+      eventBus,
+      canTilt,
+    );
+
+  const middle = (
+    type: "pointerdown" | "pointermove" | "pointerup",
+    x: number,
+    y: number,
+  ) => {
+    const event = new PointerEvent(type, {
+      button: type === "pointermove" ? -1 : 1,
+      clientX: x,
+      clientY: y,
+      pointerId: 1,
+    });
+    // Held during the drag, released on pointerup.
+    Object.assign(event, { buttons: type === "pointerup" ? 0 : 4 });
+    if (type === "pointerdown") inputHandler["onPointerDown"](event);
+    else if (type === "pointermove") inputHandler["onPointerMove"](event);
+    else inputHandler.onPointerUp(event);
+  };
+
+  const emitted = (emit: ReturnType<typeof vi.spyOn>, type: unknown) =>
+    emit.mock.calls
+      .map((c: unknown[]) => c[0])
+      .filter((e: unknown) => e instanceof (type as new () => object));
+
+  beforeEach(() => {
+    new UserSettings().removeCached(KEYBINDS_KEY, false);
+    eventBus = new EventBus();
+  });
+
+  afterEach(() => inputHandler.destroy());
+
+  it("tilts toward the horizon when dragging the middle button up", () => {
+    inputHandler = makeHandler(true);
+    const emit = vi.spyOn(eventBus, "emit");
+    middle("pointerdown", 300, 300);
+    middle("pointermove", 300, 280);
+    middle("pointermove", 300, 260);
+    middle("pointerup", 300, 260);
+
+    const tilts = emitted(emit, CameraTiltEvent) as CameraTiltEvent[];
+    expect(tilts.reduce((sum, e) => sum + e.degrees, 0)).toBeCloseTo(10);
+    expect(emitted(emit, AutoUpgradeEvent)).toHaveLength(0);
+    expect(emitted(emit, DragEvent)).toHaveLength(0);
+  });
+
+  it("still auto-upgrades on a middle click that doesn't drag", () => {
+    inputHandler = makeHandler(true);
+    const emit = vi.spyOn(eventBus, "emit");
+    middle("pointerdown", 150, 250);
+    middle("pointermove", 152, 251);
+    expect(emitted(emit, AutoUpgradeEvent)).toHaveLength(0);
+    middle("pointerup", 152, 251);
+
+    expect(emitted(emit, CameraTiltEvent)).toHaveLength(0);
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({ x: 150, y: 250 }),
+    );
+    expect(emitted(emit, AutoUpgradeEvent)).toHaveLength(1);
+  });
+
+  it("stops tilting once the middle button is up, even unseen", () => {
+    inputHandler = makeHandler(true);
+    const emit = vi.spyOn(eventBus, "emit");
+    middle("pointerdown", 300, 300);
+    middle("pointermove", 300, 260);
+    const moved = new PointerEvent("pointermove", {
+      button: -1,
+      clientX: 300,
+      clientY: 200,
+      pointerId: 1,
+    });
+    Object.assign(moved, { buttons: 0 });
+    inputHandler["onPointerMove"](moved);
+
+    const tilts = emitted(emit, CameraTiltEvent) as CameraTiltEvent[];
+    expect(tilts.reduce((sum, e) => sum + e.degrees, 0)).toBeCloseTo(10);
+  });
+
+  it("keeps the middle button as auto-upgrade on the flat map", () => {
+    inputHandler = makeHandler(false);
+    const emit = vi.spyOn(eventBus, "emit");
+    middle("pointerdown", 150, 250);
+    expect(emitted(emit, AutoUpgradeEvent)).toHaveLength(1);
+    middle("pointermove", 150, 200);
+    middle("pointerup", 150, 200);
+    expect(emitted(emit, CameraTiltEvent)).toHaveLength(0);
+    expect(emitted(emit, AutoUpgradeEvent)).toHaveLength(1);
+  });
+
+  it("tilts while Page Up or Page Down is held", () => {
+    vi.useFakeTimers();
+    try {
+      inputHandler = makeHandler(true);
+      inputHandler.initialize();
+      const emit = vi.spyOn(eventBus, "emit");
+
+      window.dispatchEvent(new KeyboardEvent("keydown", { code: "PageUp" }));
+      vi.advanceTimersByTime(20);
+      window.dispatchEvent(new KeyboardEvent("keyup", { code: "PageUp" }));
+      const up = emitted(emit, CameraTiltEvent) as CameraTiltEvent[];
+      expect(up.length).toBeGreaterThan(0);
+      expect(up.every((e) => e.degrees > 0)).toBe(true);
+
+      emit.mockClear();
+      window.dispatchEvent(new KeyboardEvent("keydown", { code: "PageDown" }));
+      vi.advanceTimersByTime(20);
+      window.dispatchEvent(new KeyboardEvent("keyup", { code: "PageDown" }));
+      const down = emitted(emit, CameraTiltEvent) as CameraTiltEvent[];
+      expect(down.length).toBeGreaterThan(0);
+      expect(down.every((e) => e.degrees < 0)).toBe(true);
+
+      emit.mockClear();
+      vi.advanceTimersByTime(20);
+      expect(emitted(emit, CameraTiltEvent)).toHaveLength(0);
+    } finally {
       vi.useRealTimers();
     }
   });

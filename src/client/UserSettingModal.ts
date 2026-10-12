@@ -1658,6 +1658,26 @@ export class UserSettingModal extends BaseModal {
         .display=${this.getKeyChar("moveRight")}
         @change=${this.handleKeybindChange}
       ></setting-keybind>
+
+      <setting-keybind
+        action="tiltUp"
+        label=${translateText("user_setting.tilt_up")}
+        description=${translateText("user_setting.tilt_up_desc")}
+        defaultKey=${this.defaultKeybinds.tiltUp}
+        .value=${this.getKeyValue("tiltUp")}
+        .display=${this.getKeyChar("tiltUp")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="tiltDown"
+        label=${translateText("user_setting.tilt_down")}
+        description=${translateText("user_setting.tilt_down_desc")}
+        defaultKey=${this.defaultKeybinds.tiltDown}
+        .value=${this.getKeyValue("tiltDown")}
+        .display=${this.getKeyChar("tiltDown")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
     `;
   }
 

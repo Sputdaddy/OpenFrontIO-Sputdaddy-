@@ -1,16 +1,24 @@
 import { Cell } from "@openfront/engine-api/game/GameTypes";
 import { EventBus, GameEvent } from "@openfront/shared/EventBus";
 import {
+  CameraTiltEvent,
   CenterCameraEvent,
   DragEvent,
   ZOOM_DELTA_DIVISOR,
   ZoomEvent,
 } from "./InputHandler";
 import {
-  drawnGroundPoint,
+  type CameraTilt,
+  cameraTilt,
+  clampTilt,
+  DEFAULT_TILT_DEGREES,
+  drawnGroundY,
+  maxRaise,
+  seaLevelY,
   type SurfaceElevation,
   surfaceUnderGroundPoint,
 } from "./render/three/Elevation";
+import { UserSettings } from "./UserSettings";
 import { GameView, PlayerView, UnitView } from "./view";
 
 export class GoToPlayerEvent implements GameEvent {
@@ -34,6 +42,8 @@ export class GoToUnitEvent implements GameEvent {
 export const GOTO_INTERVAL_MS = 16;
 export const CAMERA_MAX_SPEED = 15;
 export const CAMERA_SMOOTHING = 0.03;
+// Wait this long after the camera stops tilting before saving the angle.
+const SAVE_TILT_DELAY_MS = 500;
 
 export class TransformHandler {
   public scale: number = 1.8;
@@ -48,6 +58,10 @@ export class TransformHandler {
   private changed = false;
   // The 3D map's raised, tilted surface; null on the flat map.
   private elevation: SurfaceElevation | null = null;
+  // The 3D camera's tilt away from straight down, in degrees.
+  private tiltDegrees = 0;
+  private saveTiltTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly userSettings = new UserSettings();
 
   constructor(
     private game: GameView,
@@ -57,6 +71,7 @@ export class TransformHandler {
     this._boundingRect = this.canvas.getBoundingClientRect();
     this.eventBus.on(ZoomEvent, (e) => this.onZoom(e));
     this.eventBus.on(DragEvent, (e) => this.onMove(e));
+    this.eventBus.on(CameraTiltEvent, (e) => this.onTilt(e));
     this.eventBus.on(GoToPlayerEvent, (e) => this.onGoToPlayer(e));
     this.eventBus.on(GoToPositionEvent, (e) => this.onGoToPosition(e));
     this.eventBus.on(GoToUnitEvent, (e) => this.onGoToUnit(e));
@@ -64,12 +79,53 @@ export class TransformHandler {
   }
 
   /**
-   * Make screen↔tile conversions follow the 3D map's raised ground, which
-   * its tilted camera draws further up the screen than sea level.
+   * Make screen↔tile conversions follow the 3D map's tilted camera, which
+   * foreshortens the map down the screen and draws raised ground further up
+   * it than sea level. The camera starts at the player's last tilt.
    */
   setElevation(elevation: SurfaceElevation | null): void {
     this.elevation = elevation;
+    this.tiltDegrees = elevation
+      ? clampTilt(this.userSettings.cameraTilt(DEFAULT_TILT_DEGREES))
+      : 0;
     this.changed = true;
+  }
+
+  /** The 3D camera's tilt away from straight down, in degrees; 0 on the flat map. */
+  tilt(): number {
+    return this.tiltDegrees;
+  }
+
+  private onTilt(event: CameraTiltEvent) {
+    if (this.elevation === null) return;
+    const tilt = clampTilt(this.tiltDegrees + event.degrees);
+    if (tilt === this.tiltDegrees) return;
+    // Tilting turns the camera about the point in the middle of the view,
+    // which TransformHandler's offsets already pin, so they stay as they are.
+    this.tiltDegrees = tilt;
+    this.changed = true;
+    if (this.saveTiltTimer !== null) clearTimeout(this.saveTiltTimer);
+    this.saveTiltTimer = setTimeout(() => {
+      this.saveTiltTimer = null;
+      this.userSettings.setCameraTilt(this.tiltDegrees);
+    }, SAVE_TILT_DELAY_MS);
+  }
+
+  /** The tilted camera as it is now (only meaningful on the 3D map). */
+  private viewTilt(): CameraTilt {
+    const centerY =
+      this.offsetY +
+      this.game.height() / 2 +
+      (this.boundingRect().height - this.game.height()) / (2 * this.scale);
+    return cameraTilt(this.tiltDegrees, centerY);
+  }
+
+  /**
+   * Screen pixels per tile down the screen, relative to across it: below 1
+   * when the 3D camera is tilted, since it sees the map at a slant.
+   */
+  private foreshortening(): number {
+    return this.elevation ? this.viewTilt().cos : 1;
   }
 
   public updateCanvasBoundingRect() {
@@ -110,7 +166,7 @@ export class TransformHandler {
     // (reverse of Math.floor operation - we'll use the exact values)
     const gameX = cell.x;
     const gameY = this.elevation
-      ? drawnGroundPoint(this.elevation, cell.x, cell.y).y
+      ? drawnGroundY(this.elevation, this.viewTilt(), cell.x, cell.y)
       : cell.y;
 
     // Step 2: Reverse the game center offset calculation
@@ -157,7 +213,12 @@ export class TransformHandler {
       this.offsetY +
       this.game.height() / 2;
     if (this.elevation) {
-      return surfaceUnderGroundPoint(this.elevation, gameX, gameY);
+      return surfaceUnderGroundPoint(
+        this.elevation,
+        this.viewTilt(),
+        gameX,
+        gameY,
+      );
     }
     return { x: gameX, y: gameY };
   }
@@ -190,7 +251,7 @@ export class TransformHandler {
     const TopY = -this.game.height() / 2 / this.scale + this.offsetY;
 
     const gameLeftX = LeftX + this.game.width() / 2;
-    const gameTopY = TopY + this.game.height() / 2;
+    let gameTopY = TopY + this.game.height() / 2;
 
     const rightX =
       (canvasWidth - this.game.width() / 2) / this.scale + this.offsetX;
@@ -198,12 +259,14 @@ export class TransformHandler {
       (canvasHeight - this.game.height() / 2) / this.scale + this.offsetY;
 
     const gameRightX = rightX + this.game.width() / 2;
-    // On the 3D map, raised ground south of the bottom edge is drawn up
-    // into view.
-    const gameBottomY =
-      bottomY +
-      this.game.height() / 2 +
-      (this.elevation ? this.elevation.shift * this.elevation.maxHeight : 0);
+    let gameBottomY = bottomY + this.game.height() / 2;
+    if (this.elevation) {
+      // The tilted 3D camera sees more of the map down the screen, and
+      // draws raised ground south of the bottom edge up into view.
+      const t = this.viewTilt();
+      gameTopY = seaLevelY(t, gameTopY);
+      gameBottomY = seaLevelY(t, gameBottomY) + maxRaise(this.elevation, t);
+    }
 
     return [
       new Cell(Math.floor(gameLeftX), Math.floor(gameTopY)),
@@ -222,6 +285,19 @@ export class TransformHandler {
   }
 
   screenCenter(): { screenX: number; screenY: number } {
+    if (this.elevation) {
+      // The point the 3D camera looks at; the bounding rect reaches further
+      // south than north of it.
+      const { width } = this.boundingRect();
+      return {
+        screenX: Math.floor(
+          this.offsetX +
+            this.game.width() / 2 +
+            (width - this.game.width()) / (2 * this.scale),
+        ),
+        screenY: Math.floor(this.viewTilt().centerY),
+      };
+    }
     const [upperLeft, bottomRight] = this.screenBoundingRect();
     return {
       screenX: upperLeft.x + Math.floor((bottomRight.x - upperLeft.x) / 2),
@@ -346,6 +422,15 @@ export class TransformHandler {
       zoomPointX - (canvasCoords.x - this.game.width() / 2) / this.scale;
     this.offsetY =
       zoomPointY - (canvasCoords.y - this.game.height() / 2) / this.scale;
+    if (this.elevation) {
+      // Down the screen the tilted 3D camera's pixels cover more ground, so
+      // the point under the cursor is further from the middle of the view.
+      const fromCenter = canvasCoords.y - this.boundingRect().height / 2;
+      this.offsetY +=
+        fromCenter *
+        (1 / oldScale - 1 / this.scale) *
+        (1 / this.foreshortening() - 1);
+    }
     this.clampOffsets();
     this.changed = true;
   }
@@ -389,7 +474,7 @@ export class TransformHandler {
   onMove(event: DragEvent) {
     this.clearTarget();
     this.offsetX -= event.deltaX / this.scale;
-    this.offsetY -= event.deltaY / this.scale;
+    this.offsetY -= event.deltaY / this.scale / this.foreshortening();
     this.clampOffsets();
     this.changed = true;
   }
