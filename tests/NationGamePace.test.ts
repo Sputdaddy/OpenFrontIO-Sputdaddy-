@@ -13,7 +13,8 @@
  *
  * PACE_SWEEP=1 also runs the same game once per entry of SWEEP below and
  * prints a summary of each, for tuning the multipliers:
- *   PACE_SWEEP=1 npx vitest tests/NationGamePace.test.ts --run
+ *   PACE_SWEEP=1 npx vitest tests/NationGamePace.test.ts --run -t sweep \
+ *     --disableConsoleIntercept
  *
  * All randomness is PseudoRandom seeded from the fixed game ID and nation
  * names, so runs are deterministic.
@@ -194,7 +195,6 @@ function firstMinute(
 function summarize(rows: MinuteRow[]) {
   const at = (m: number) => rows[Math.min(m, rows.length) - 1];
   return {
-    map90PctClaimedAtMin: firstMinute(rows, (r) => r.claimedPct, 90),
     leader10PctAtMin: firstMinute(rows, (r) => r.leaderPct, 10),
     leader20PctAtMin: firstMinute(rows, (r) => r.leaderPct, 20),
     leader30PctAtMin: firstMinute(rows, (r) => r.leaderPct, 30),
