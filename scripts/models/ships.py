@@ -78,7 +78,7 @@ def build_warship():
             ring(0.99, 1.0, 1.0, lambda y: 0.03 + 0.5 * (deck(y) - 0.06)),
             ring(1.0, 1.0, 1.0, deck),
         ],
-        ["MetalDark", "Dark", "TeamColor", "TeamColor"],
+        ["MetalDark", "Dark", "TeamHull", "TeamHull"],
         "TeamDeck",
         "MetalDark",
     )
@@ -228,7 +228,7 @@ def hull(m, starboard, deck, bottom=-0.04, keel_sx=0.42, sides=None,
             ring(0.99, 1.0, 1.0, lambda y: 0.03 + 0.5 * (deck(y) - 0.05)),
             ring(1.0, 1.0, 1.0, deck),
         ],
-        sides or ["HullRed", "Dark", "TeamColor", "TeamColor"],
+        sides or ["HullRed", "Dark", "TeamHull", "TeamHull"],
         deck_material,
         "HullRed",
     )

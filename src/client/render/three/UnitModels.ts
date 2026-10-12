@@ -1,9 +1,11 @@
 /**
  * 3D models for units and structures on the Three.js map.
  *
- * Loads the .glb files built by scripts/models/build_models.py and draws
+ * Loads the .gltf files built by scripts/models/build_models.py and draws
  * every unit as one instance per model part. Parts whose material name
- * starts with "Team" are multiplied by the owner's colour. Moving units
+ * starts with "Team" are multiplied by the owner's colour. The models share
+ * one set of surface textures (resources/models/textures), kept on the GPU
+ * once however many models use them. Moving units
  * glide between their last and current tile over each tick and turn to face
  * where they're heading; ports turn to face the sea. Models are drawn bigger
  * on bigger maps and smaller on smaller ones (mapScale).
@@ -55,48 +57,48 @@ interface ModelSpec {
  * scales them (mapScale, modelSize).
  */
 export const UNIT_MODELS: Readonly<Record<string, ModelSpec>> = {
-  city: { file: "models/city.glb", size: 9, kind: "structure" },
-  missile_silo: { file: "models/missile_silo.glb", size: 9, kind: "structure" },
-  port: { file: "models/port.glb", size: 9, kind: "structure" },
-  factory: { file: "models/factory.glb", size: 9, kind: "structure" },
-  defense_post: { file: "models/defense_post.glb", size: 7, kind: "structure" },
-  sam_launcher: { file: "models/sam_launcher.glb", size: 9, kind: "structure" },
-  warship: { file: "models/warship.glb", size: 11, kind: "ship" },
-  transport: { file: "models/transport.glb", size: 6, kind: "ship" },
-  trade_ship: { file: "models/trade_ship.glb", size: 10, kind: "ship" },
-  train_engine: { file: "models/train_engine.glb", size: 2, kind: "train" },
-  train_car: { file: "models/train_car.glb", size: 2, kind: "train" },
+  city: { file: "models/city.gltf", size: 9, kind: "structure" },
+  missile_silo: { file: "models/missile_silo.gltf", size: 9, kind: "structure" },
+  port: { file: "models/port.gltf", size: 9, kind: "structure" },
+  factory: { file: "models/factory.gltf", size: 9, kind: "structure" },
+  defense_post: { file: "models/defense_post.gltf", size: 7, kind: "structure" },
+  sam_launcher: { file: "models/sam_launcher.gltf", size: 9, kind: "structure" },
+  warship: { file: "models/warship.gltf", size: 11, kind: "ship" },
+  transport: { file: "models/transport.gltf", size: 6, kind: "ship" },
+  trade_ship: { file: "models/trade_ship.gltf", size: 10, kind: "ship" },
+  train_engine: { file: "models/train_engine.gltf", size: 2, kind: "train" },
+  train_car: { file: "models/train_car.gltf", size: 2, kind: "train" },
   train_car_loaded: {
-    file: "models/train_car_loaded.glb",
+    file: "models/train_car_loaded.gltf",
     size: 2,
     kind: "train",
   },
   atom_bomb: {
-    file: "models/atom_bomb.glb",
+    file: "models/atom_bomb.gltf",
     size: 6,
     kind: "air",
     altitude: 16,
   },
   hydrogen_bomb: {
-    file: "models/hydrogen_bomb.glb",
+    file: "models/hydrogen_bomb.gltf",
     size: 8,
     kind: "air",
     altitude: 18,
   },
-  mirv: { file: "models/mirv.glb", size: 11, kind: "air", altitude: 20 },
+  mirv: { file: "models/mirv.gltf", size: 11, kind: "air", altitude: 20 },
   mirv_warhead: {
-    file: "models/mirv_warhead.glb",
+    file: "models/mirv_warhead.gltf",
     size: 2.5,
     kind: "air",
     altitude: 14,
   },
   sam_missile: {
-    file: "models/sam_missile.glb",
+    file: "models/sam_missile.gltf",
     size: 3,
     kind: "air",
     altitude: 12,
   },
-  shell: { file: "models/shell.glb", size: 1.2, kind: "air", altitude: 1.5 },
+  shell: { file: "models/shell.gltf", size: 1.2, kind: "air", altitude: 1.5 },
 };
 
 const MODEL_BY_TYPE: Readonly<Record<string, string>> = {
@@ -412,6 +414,9 @@ export class UnitModels {
   /** This tick's units, by model. */
   private byModel = new Map<string, Tracked[]>();
   private readonly envMap: THREE.Texture;
+  /** Surface textures by image name, shared by every model. */
+  private readonly textures = new Map<string, THREE.Texture>();
+  private readonly anisotropy: number;
   private readonly ghostMaterial = new THREE.MeshBasicMaterial({
     opacity: GHOST_OPACITY,
     depthFunc: THREE.GreaterDepth,
@@ -443,6 +448,7 @@ export class UnitModels {
     private readonly isWater: (x: number, y: number) => boolean,
   ) {
     this.mapScale = mapScale(mapW, mapH);
+    this.anisotropy = renderer.capabilities.getMaxAnisotropy();
     scene.add(this.group);
     // A soft studio environment so the models' metal and glass have
     // something to reflect. Only the models use it, not the terrain.
@@ -483,6 +489,8 @@ export class UnitModels {
       const material = obj.material as THREE.MeshStandardMaterial;
       material.envMap = this.envMap;
       material.envMapIntensity = 0.6;
+      material.map = this.shared(material.map);
+      material.normalMap = this.shared(material.normalMap);
       parts.push({
         geometry: obj.geometry.clone().applyMatrix4(obj.matrixWorld),
         material,
@@ -493,6 +501,24 @@ export class UnitModels {
     });
     if (structure) parts.push(this.foundation(parts));
     return parts;
+  }
+
+  /**
+   * Each model file loads its own copy of the textures it uses; keep the
+   * first one of each image and drop the rest, so the GPU holds one.
+   */
+  private shared(texture: THREE.Texture | null): THREE.Texture | null {
+    if (texture === null || texture.name === "") return texture;
+    const kept = this.textures.get(texture.name);
+    if (kept !== undefined) {
+      if (kept !== texture) texture.dispose();
+      return kept;
+    }
+    // Seen at a slant, as the tilted camera sees walls and roofs, textures
+    // blur without anisotropic filtering.
+    texture.anisotropy = this.anisotropy;
+    this.textures.set(texture.name, texture);
+    return texture;
   }
 
   /**
@@ -686,6 +712,8 @@ export class UnitModels {
     this.disposed = true;
     for (const model of this.models.values()) model.dispose();
     this.models.clear();
+    for (const texture of this.textures.values()) texture.dispose();
+    this.textures.clear();
     this.ghostMaterial.dispose();
     this.envMap.dispose();
     this.group.removeFromParent();
