@@ -58,11 +58,23 @@ interface ModelSpec {
  */
 export const UNIT_MODELS: Readonly<Record<string, ModelSpec>> = {
   city: { file: "models/city.gltf", size: 9, kind: "structure" },
-  missile_silo: { file: "models/missile_silo.gltf", size: 9, kind: "structure" },
+  missile_silo: {
+    file: "models/missile_silo.gltf",
+    size: 9,
+    kind: "structure",
+  },
   port: { file: "models/port.gltf", size: 9, kind: "structure" },
   factory: { file: "models/factory.gltf", size: 9, kind: "structure" },
-  defense_post: { file: "models/defense_post.gltf", size: 7, kind: "structure" },
-  sam_launcher: { file: "models/sam_launcher.gltf", size: 9, kind: "structure" },
+  defense_post: {
+    file: "models/defense_post.gltf",
+    size: 7,
+    kind: "structure",
+  },
+  sam_launcher: {
+    file: "models/sam_launcher.gltf",
+    size: 9,
+    kind: "structure",
+  },
   warship: { file: "models/warship.gltf", size: 11, kind: "ship" },
   transport: { file: "models/transport.gltf", size: 6, kind: "ship" },
   trade_ship: { file: "models/trade_ship.gltf", size: 10, kind: "ship" },

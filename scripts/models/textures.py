@@ -173,13 +173,13 @@ def tint_toward(amount, rgb):
 
 def concrete(g):
     ids, edge = g.cells(64, 64)
-    v = 1.0 + g.per_cell(ids, 0.06)
-    v *= 1.0 + 0.05 * g.noise(24, 400)
+    v = 1.0 + g.per_cell(ids, 0.08)
+    v *= 1.0 + 0.07 * g.noise(24, 400)
     v *= 1.0 + 0.035 * g.noise(1, 6)
     joints = np.clip(1.2 - edge / 0.9, 0.0, 1.0)
-    v *= 1.0 - 0.22 * joints
+    v *= 1.0 - 0.3 * joints
     stains = smoothstep(0.9, 2.2, g.noise(30, 300, beta=1.2))
-    v *= 1.0 - 0.14 * stains
+    v *= 1.0 - 0.18 * stains
     cracks = g.walks(14, 200, wiggle=0.12)
     v *= 1.0 - 0.35 * cracks
     pits = g.dots(2600, 0.7)
@@ -276,7 +276,7 @@ def metal(g):
     oil-canning per plate, grime and rust streaks running down."""
     offsets = g.rng.integers(0, 8, g.n // 64) * 32
     ids, edge = g.cells(256, 64, offsets=offsets)
-    v = 1.0 + g.per_cell(ids, 0.045)
+    v = 1.0 + g.per_cell(ids, 0.06)
     v *= 1.0 + 0.05 * g.noise(16, 300)
     v *= 1.0 + 0.025 * g.noise(0.5, 3)
     seam = np.clip(1.3 - edge / 0.8, 0, 1)
@@ -298,7 +298,7 @@ def deck(g):
     """Non-skid deck coating: gritty surface, panel lines, tie-down
     points and scuffed walkways. Grey only, the owner tint colours it."""
     ids, edge = g.cells(128, 128)
-    v = 1.0 + g.per_cell(ids, 0.06)
+    v = 1.0 + g.per_cell(ids, 0.08)
     grit = g.noise(0.5, 2.5, beta=0.2)
     v *= 1.0 + 0.06 * grit
     v *= 1.0 + 0.04 * g.noise(20, 300)
@@ -314,7 +314,7 @@ def deck(g):
 
 def paint(g):
     """Painted surface: slight mottling, faint streaks and scratches."""
-    v = 1.0 + 0.05 * g.noise(16, 300)
+    v = 1.0 + 0.07 * g.noise(16, 300)
     v *= 1.0 + 0.02 * g.noise(0.5, 3)
     streaks = smoothstep(0.8, 2.4, g.noise(2, 160, stretch=14, beta=0.9))
     v *= 1.0 - 0.06 * streaks
@@ -328,8 +328,8 @@ def roof(g):
     """Flat roof membrane: lapped strips, ponding stains, patches and
     gravel. Grey only, the owner tint colours it."""
     ids, edge = g.cells(1024, 64)
-    v = 1.0 + g.per_cell(ids, 0.05)
-    v *= 1.0 + 0.06 * g.noise(20, 300)
+    v = 1.0 + g.per_cell(ids, 0.07)
+    v *= 1.0 + 0.08 * g.noise(20, 300)
     grit = g.noise(0.5, 2, beta=0.2)
     v *= 1.0 + 0.05 * grit
     lap = np.clip(1.0 - np.abs((g.y % 64) - 2.0) / 1.5, 0, 1)
@@ -337,14 +337,14 @@ def roof(g):
     seam = np.clip(1.2 - edge / 0.8, 0, 1)
     v *= 1.0 - 0.2 * seam
     ponding = smoothstep(0.7, 2.2, g.noise(20, 250, beta=1.3))
-    v *= 1.0 - 0.18 * ponding
+    v *= 1.0 - 0.25 * ponding
     patch = np.zeros((g.n, g.n))
     for _ in range(10):
         x0, y0 = g.rng.uniform(0, g.n, 2)
         w, hgt = g.rng.uniform(40, 140, 2)
         patch = np.maximum(patch, ((g.x - x0) % g.n < w) & ((g.y - y0) % g.n < hgt))
     patch = g.blur(patch.astype(float), 0.8)
-    v *= 1.0 - 0.1 * patch
+    v *= 1.0 - 0.14 * patch
     h = 0.5 * grit + 0.8 * lap - 0.8 * seam + 0.6 * patch
     return v, None, h
 
