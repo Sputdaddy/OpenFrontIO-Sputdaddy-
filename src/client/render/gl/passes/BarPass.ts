@@ -64,6 +64,11 @@ export class BarPass {
   private veterancyCount = 0;
 
   private mapW: number;
+  /**
+   * Tiles to raise a unit's bars up the screen: the 3D map lifts them onto
+   * the raised ground under the unit. Unset on the 2D map.
+   */
+  private anchorLift: ((unit: UnitState) => number) | null = null;
   private warshipMaxHealth: number;
   private veterancyHealthBonus: number;
 
@@ -127,6 +132,11 @@ export class BarPass {
     gl.vertexAttribDivisor(1, 1);
 
     gl.bindVertexArray(null);
+  }
+
+  /** Raise each unit's bars by `lift(unit)` tiles up the screen (null = don't). */
+  setAnchorLift(lift: ((unit: UnitState) => number) | null): void {
+    this.anchorLift = lift;
   }
 
   /** Rebuild bar instance data from current unit state. */
@@ -260,11 +270,17 @@ export class BarPass {
 
   // ---- Private ----
 
+  /** Tiles to raise this unit's bars; 0 on the 2D map. */
+  private liftOf(unit: UnitState): number {
+    return this.anchorLift === null ? 0 : this.anchorLift(unit);
+  }
+
   private pushHealth(unit: UnitState, progress: number): void {
     if (this.healthCount >= this.maxBars) return;
     const off = this.healthCount * FLOATS_PER_INSTANCE;
     this.healthData[off] = unit.pos % this.mapW;
-    this.healthData[off + 1] = (unit.pos - this.healthData[off]) / this.mapW;
+    this.healthData[off + 1] =
+      (unit.pos - this.healthData[off]) / this.mapW - this.liftOf(unit);
     this.healthData[off + 2] = progress;
     this.healthCount++;
   }
@@ -272,7 +288,7 @@ export class BarPass {
   /** Emit one gold pip instance per veterancy level, stacked by slot index. */
   private pushVeterancy(unit: UnitState): void {
     const x = unit.pos % this.mapW;
-    const y = (unit.pos - x) / this.mapW;
+    const y = (unit.pos - x) / this.mapW - this.liftOf(unit);
     for (let slot = 0; slot < unit.veterancy; slot++) {
       if (this.veterancyCount >= this.maxBars) return;
       const off = this.veterancyCount * FLOATS_PER_INSTANCE;
@@ -288,7 +304,7 @@ export class BarPass {
     const off = this.progressCount * FLOATS_PER_INSTANCE;
     const x = unit.pos % this.mapW;
     this.progressData[off] = x;
-    this.progressData[off + 1] = (unit.pos - x) / this.mapW;
+    this.progressData[off + 1] = (unit.pos - x) / this.mapW - this.liftOf(unit);
     this.progressData[off + 2] = progress;
     this.progressCount++;
   }

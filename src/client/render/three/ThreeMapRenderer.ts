@@ -16,9 +16,11 @@
  * Elevation.ts).
  *
  * Units and structures are drawn as 3D models (UnitModels), and railroads
- * are drawn into the terrain. Not drawn yet: names, trails, explosions and
- * the other effect passes. Their setters are accepted and ignored so the
- * client can push data to this renderer exactly as it does to MapRenderer.
+ * are drawn into the terrain. Names, troop counts, popups, structure levels
+ * and bars are the 2D map's own passes, drawn over the scene (LabelLayer).
+ * Not drawn yet: trails, explosions and the other effect passes. Their
+ * setters are accepted and ignored so the client can push data to this
+ * renderer exactly as it does to MapRenderer.
  */
 
 import type { MapLayer } from "@openfront/engine-api/game/MapFiles";
@@ -59,6 +61,7 @@ import {
   buildReliefNormals,
   SurfaceHeights,
 } from "./Heightfield";
+import { LabelLayer } from "./LabelLayer";
 import { UnitModels } from "./UnitModels";
 
 const PALETTE_SIZE = getPaletteSize();
@@ -104,6 +107,8 @@ export class ThreeMapRenderer implements MapView {
   private readonly sun = new THREE.DirectionalLight(0xfff2de, 2.4);
   private readonly surface: SurfaceHeights;
   private readonly units: UnitModels;
+  private readonly labels: LabelLayer;
+  private readonly gl: WebGL2RenderingContext;
   /** How the tilted camera draws raised ground; TransformHandler uses it. */
   readonly elevation: SurfaceElevation;
   private readonly uniforms = {
@@ -148,6 +153,7 @@ export class ThreeMapRenderer implements MapView {
     if (glResult.gl === null) {
       throw new GLUnavailableError(glResult.status, glResult.renderer);
     }
+    this.gl = glResult.gl;
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       context: glResult.gl,
@@ -438,6 +444,18 @@ export class ThreeMapRenderer implements MapView {
       },
     );
 
+    this.labels = new LabelLayer(
+      this.gl,
+      header,
+      this.paletteData,
+      config,
+      settings,
+      this.elevation.heightAt,
+      this.units,
+    );
+    // The label passes set GL state behind three.js's back.
+    this.renderer.resetState();
+
     const rect = canvas.getBoundingClientRect();
     if (rect.width > 0) this.resize(rect.width, rect.height);
     this.resizeObs = new ResizeObserver((entries) => {
@@ -508,6 +526,18 @@ export class ThreeMapRenderer implements MapView {
     this.fitSunToView(Math.max(halfW, halfH / cos));
     this.units.draw(this.elevation.heightAt);
     this.renderer.render(this.scene, cam);
+    this.renderer.resetState();
+    // The squashed frustum keeps sea level where the flat camera has it.
+    this.labels.draw(this.gl, {
+      camX: this.camX,
+      camY: this.camY,
+      zoom: this.camZoom,
+      width: this.canvas.width,
+      height: this.canvas.height,
+      rowScale: 1,
+      raise: TILT_SHIFT,
+    });
+    this.renderer.resetState();
   }
 
   /** A player's colour (the palette's territory colour) for their models. */
@@ -615,28 +645,32 @@ export class ThreeMapRenderer implements MapView {
   updatePalette(paletteData: Float32Array): void {
     this.paletteData.set(paletteData);
     this.paletteTex.needsUpdate = true;
+    this.labels.refreshPlayerColors(this.paletteData);
   }
 
   addPlayers(
-    _players: PlayerStatic[],
+    players: PlayerStatic[],
     paletteData: Float32Array,
     _patternMeta: Float32Array,
     _patternData: Uint8Array,
   ): void {
     this.updatePalette(paletteData);
+    this.labels.addPlayers(players, this.paletteData);
   }
 
   updatePlayerCosmetics(
-    _players: PlayerStatic[],
+    players: PlayerStatic[],
     paletteData: Float32Array,
     _patternMeta: Float32Array,
     _patternData: Uint8Array,
   ): void {
     this.updatePalette(paletteData);
+    this.labels.updatePlayerCosmetics(players);
   }
 
   setHighlightOwner(ownerID: number): void {
     this.uniforms.uHighlight.value = ownerID;
+    this.labels.setHighlightOwner(ownerID);
   }
 
   // ---- MapView: terrain ----
@@ -670,14 +704,66 @@ export class ThreeMapRenderer implements MapView {
 
   // ---- MapView: units ----
 
-  updateUnits(units: Map<number, UnitState>, _gameTick: number): void {
+  updateUnits(units: Map<number, UnitState>, gameTick: number): void {
     this.units.update(units);
+    this.labels.updateUnits(units, gameTick);
+  }
+
+  updateStructures(units: Map<number, UnitState>): void {
+    this.labels.updateStructures(units);
   }
 
   uploadRailroadState(data: Uint8Array): void {
     if (data.length !== this.railData.length) return;
     this.railData.set(data);
     this.railTex.needsUpdate = true;
+  }
+
+  // ---- MapView: names and labels ----
+
+  updateNames(
+    names: Map<string, NameEntry>,
+    players: Map<number, PlayerState>,
+    snap: boolean,
+    statusData?: Map<number, PlayerStatusData>,
+  ): void {
+    this.labels.updateNames(names, players, snap, statusData);
+  }
+
+  refreshNames(displayNames: Map<string, string>): void {
+    this.labels.refreshNames(displayNames);
+  }
+
+  applyConquestEvents(events: ConquestFx[]): void {
+    this.labels.applyConquestEvents(events);
+  }
+
+  setAttackTroopLabels(labels: AttackTroopLabel[]): void {
+    this.labels.setAttackTroopLabels(labels);
+  }
+
+  applyBonusEvents(events: BonusEvent[]): void {
+    this.labels.applyBonusEvents(events);
+  }
+
+  updateGhostPreview(data: GhostPreviewData | null): void {
+    this.labels.updateGhostPreview(data);
+  }
+
+  setLocalPlayerID(id: number): void {
+    this.labels.setLocalPlayerID(id);
+  }
+
+  setAltView(active: boolean): void {
+    this.labels.setAltView(active);
+  }
+
+  setMouseWorldPos(x: number, y: number): void {
+    this.labels.setMouseWorldPos(x, y);
+  }
+
+  setHighlightStructureTypes(unitTypes: string[] | null): void {
+    this.labels.setHighlightStructureTypes(unitTypes);
   }
 
   // ---- MapView: not drawn yet ----
@@ -692,23 +778,11 @@ export class ThreeMapRenderer implements MapView {
   setPlayerSkin(_smallID: number, _url: string | null): void {}
   initSkinAtlas(_urls: readonly string[]): void {}
   setPlayerSpawn(_smallID: number, _x: number, _y: number): void {}
-  updateNames(
-    _names: Map<string, NameEntry>,
-    _players: Map<number, PlayerState>,
-    _snap: boolean,
-    _statusData?: Map<number, PlayerStatusData>,
-  ): void {}
-  refreshNames(_displayNames: Map<string, string>): void {}
   updateRelations(_data: Uint8Array, _size: number): void {}
-  updateStructures(_units: Map<number, UnitState>): void {}
   applyDeadUnits(_deadUnits: DeadUnitFx[]): void {}
-  applyConquestEvents(_events: ConquestFx[]): void {}
-  setAttackTroopLabels(_labels: AttackTroopLabel[]): void {}
-  applyBonusEvents(_events: BonusEvent[]): void {}
   triggerBlockedFlash(_tileX: number, _tileY: number): void {}
   applyRailroadDust(_tileRefs: number[]): void {}
   updateAttackRings(_rings: AttackRingInput[]): void {}
-  updateGhostPreview(_data: GhostPreviewData | null): void {}
   updateNukeTrajectory(_data: NukeTrajectoryData | null): void {}
   updateNukeTelegraphs(_data: NukeTelegraphData[]): void {}
   updateSpawnOverlay(_inSpawnPhase: boolean, _centers: SpawnCenter[]): void {}
@@ -721,12 +795,8 @@ export class ThreeMapRenderer implements MapView {
   setSelectedUnits(_unitIds: readonly number[]): void {}
   showMoveIndicator(_tileX: number, _tileY: number, _ownerID: number): void {}
   setSAMAllianceClusters(_clusters: Map<number, number>): void {}
-  setLocalPlayerID(_id: number): void {}
   setLocalRailColor(_r: number, _g: number, _b: number): void {}
-  setAltView(_active: boolean): void {}
   setGridView(_active: boolean): void {}
-  setMouseWorldPos(_x: number, _y: number): void {}
-  setHighlightStructureTypes(_unitTypes: string[] | null): void {}
 
   // ---- Lifecycle ----
 
@@ -738,6 +808,7 @@ export class ThreeMapRenderer implements MapView {
     this.resizeObs = null;
     this.onContextRestored = null;
     this.units.dispose();
+    this.labels.dispose();
     this.scene.traverse((obj) => {
       if (obj instanceof THREE.Mesh) {
         obj.geometry.dispose();

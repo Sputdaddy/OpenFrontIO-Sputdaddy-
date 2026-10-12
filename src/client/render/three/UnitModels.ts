@@ -406,6 +406,8 @@ interface Tracked {
 export class UnitModels {
   private readonly group = new THREE.Group();
   private readonly models = new Map<string, ModelInstances>();
+  /** Height of each loaded model's top, in model units (its size is 1). */
+  private readonly tops = new Map<string, number>();
   private readonly tracked = new Map<number, Tracked>();
   /** This tick's units, by model. */
   private byModel = new Map<string, Tracked[]>();
@@ -465,6 +467,7 @@ export class UnitModels {
               this.group,
             ),
           );
+          this.tops.set(key, new THREE.Box3().setFromObject(gltf.scene).max.y);
         } catch (err) {
           console.warn(`3D map: could not load ${spec.file}`, err);
         }
@@ -570,6 +573,60 @@ export class UnitModels {
     for (const id of this.tracked.keys()) {
       if (!seen.has(id)) this.tracked.delete(id);
     }
+  }
+
+  /** How many models have loaded so far (labels over them move as they do). */
+  get loadedModels(): number {
+    return this.models.size;
+  }
+
+  /**
+   * Height of the ground a unit's model stands on (the deck of the bridge for
+   * trains, the flight height for missiles), at the unit's tile. Units
+   * without a model stand on the ground under them.
+   */
+  groundOf(
+    unit: UnitState,
+    heightAt: (x: number, y: number) => number,
+  ): number {
+    const x = (unit.pos % this.mapW) + 0.5;
+    const y = Math.floor(unit.pos / this.mapW) + 0.5;
+    const key = modelFor(unit);
+    if (key === null) return heightAt(x, y);
+    const spec = UNIT_MODELS[key];
+    switch (spec.kind) {
+      case "structure":
+        return footprintTop(
+          heightAt,
+          x,
+          y,
+          modelSize(key, unit.level, this.mapScale, this.structureSpacing),
+        );
+      case "ship":
+        return 0;
+      case "train":
+        return Math.max(heightAt(x, y), BRIDGE_DECK);
+      case "air":
+        return (spec.altitude ?? 0) * this.mapScale;
+    }
+  }
+
+  /**
+   * Height of the top of a unit's model at its tile, where labels over it
+   * go. Until the model has loaded, a guess of half its size.
+   */
+  topOf(unit: UnitState, heightAt: (x: number, y: number) => number): number {
+    const ground = this.groundOf(unit, heightAt);
+    const key = modelFor(unit);
+    if (key === null) return ground;
+    const size = modelSize(
+      key,
+      unit.level,
+      this.mapScale,
+      this.structureSpacing,
+    );
+    const height = unit.underConstruction ? CONSTRUCTION_HEIGHT : 1;
+    return ground + (this.tops.get(key) ?? 0.5) * size * height;
   }
 
   /** Position every instance for this frame. */

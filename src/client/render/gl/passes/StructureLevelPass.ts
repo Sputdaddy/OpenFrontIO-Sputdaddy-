@@ -147,6 +147,11 @@ export class StructureLevelPass {
   private typeToAtlasCol = new Map<string, number>();
   /** Build-button hover highlight bitmask (0 = off). */
   private highlightMask = 0;
+  /**
+   * Tiles to raise a structure's level up the screen: the 3D map lifts it
+   * to the top of the structure's model. Unset on the 2D map.
+   */
+  private anchorLift: ((unit: UnitState) => number) | null = null;
 
   // Last units uploaded + which font that layout used, so draw() can re-layout
   // when the font toggles (digit advances differ between fonts).
@@ -324,7 +329,9 @@ export class StructureLevelPass {
       );
 
       const x = unit.pos % this.mapW;
-      const y = (unit.pos - x) / this.mapW;
+      const y =
+        (unit.pos - x) / this.mapW -
+        (this.anchorLift === null ? 0 : this.anchorLift(unit));
       const len = Math.min(levelStr.length, MAX_LEVEL_CHARS);
       const atlasIdx = this.typeToAtlasCol.get(unit.unitType) ?? 0;
 
@@ -397,6 +404,14 @@ export class StructureLevelPass {
 
     gl.bindVertexArray(this.vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.instanceCount);
+  }
+
+  /**
+   * Raise each structure's level by `lift(unit)` tiles up the screen
+   * (null = don't). Takes effect from the next updateStructures.
+   */
+  setAnchorLift(lift: ((unit: UnitState) => number) | null): void {
+    this.anchorLift = lift;
   }
 
   /** Highlight structures of the given types (null/empty = off). Dims all other types. */
