@@ -2,10 +2,11 @@
  * 3D models for units and structures on the Three.js map.
  *
  * Loads the .glb files built by scripts/models/build_models.py and draws
- * every unit of a modelled type as one instance per model part. Parts whose
- * material name starts with "Team" are multiplied by the owner's colour.
- * Ships glide between their last and current tile over each tick and turn
- * to face where they're heading.
+ * every unit as one instance per model part. Parts whose material name
+ * starts with "Team" are multiplied by the owner's colour. Moving units
+ * glide between their last and current tile over each tick and turn to face
+ * where they're heading; ports turn to face the sea. Models are drawn bigger
+ * on bigger maps and smaller on smaller ones (mapScale).
  */
 
 import { assetUrl } from "@openfront/shared/AssetUrls";
@@ -13,23 +14,130 @@ import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { UnitState } from "../types";
-import { UT_CITY, UT_MISSILE_SILO, UT_WARSHIP } from "../types";
+import {
+  TrainType,
+  UT_ATOM_BOMB,
+  UT_CITY,
+  UT_DEFENSE_POST,
+  UT_FACTORY,
+  UT_HYDROGEN_BOMB,
+  UT_MIRV,
+  UT_MIRV_WARHEAD,
+  UT_MISSILE_SILO,
+  UT_PORT,
+  UT_SAM_LAUNCHER,
+  UT_SAM_MISSILE,
+  UT_SHELL,
+  UT_TRADE_SHIP,
+  UT_TRAIN,
+  UT_TRANSPORT,
+  UT_WARSHIP,
+} from "../types";
+
+/**
+ * How a model stands on the map: structures on the highest ground under
+ * them, ships at sea level, trains on the ground under them, and missiles
+ * and shells in the air.
+ */
+type ModelKind = "structure" | "ship" | "train" | "air";
 
 interface ModelSpec {
   file: string;
-  /** Structure footprint, or ship length, in tiles. */
+  /** Structure footprint, or length of anything that moves, in tiles. */
   size: number;
-  /** Ships float at sea level and turn to face their heading. */
-  ship: boolean;
+  kind: ModelKind;
+  /** Height above sea level of things in the air. */
+  altitude?: number;
 }
 
-/** Unit types drawn as 3D models. Other types aren't drawn on this map yet. */
+/**
+ * Every model, by key. Sizes match MAP_SIZES in build_models.py; each map
+ * scales them (mapScale, modelSize).
+ */
 export const UNIT_MODELS: Readonly<Record<string, ModelSpec>> = {
-  [UT_CITY]: { file: "models/city.glb", size: 9, ship: false },
-  [UT_MISSILE_SILO]: { file: "models/missile_silo.glb", size: 9, ship: false },
-  [UT_WARSHIP]: { file: "models/warship.glb", size: 11, ship: true },
+  city: { file: "models/city.glb", size: 9, kind: "structure" },
+  missile_silo: { file: "models/missile_silo.glb", size: 9, kind: "structure" },
+  port: { file: "models/port.glb", size: 9, kind: "structure" },
+  factory: { file: "models/factory.glb", size: 9, kind: "structure" },
+  defense_post: { file: "models/defense_post.glb", size: 7, kind: "structure" },
+  sam_launcher: { file: "models/sam_launcher.glb", size: 9, kind: "structure" },
+  warship: { file: "models/warship.glb", size: 11, kind: "ship" },
+  transport: { file: "models/transport.glb", size: 6, kind: "ship" },
+  trade_ship: { file: "models/trade_ship.glb", size: 10, kind: "ship" },
+  train_engine: { file: "models/train_engine.glb", size: 2, kind: "train" },
+  train_car: { file: "models/train_car.glb", size: 2, kind: "train" },
+  train_car_loaded: {
+    file: "models/train_car_loaded.glb",
+    size: 2,
+    kind: "train",
+  },
+  atom_bomb: {
+    file: "models/atom_bomb.glb",
+    size: 6,
+    kind: "air",
+    altitude: 16,
+  },
+  hydrogen_bomb: {
+    file: "models/hydrogen_bomb.glb",
+    size: 8,
+    kind: "air",
+    altitude: 18,
+  },
+  mirv: { file: "models/mirv.glb", size: 11, kind: "air", altitude: 20 },
+  mirv_warhead: {
+    file: "models/mirv_warhead.glb",
+    size: 2.5,
+    kind: "air",
+    altitude: 14,
+  },
+  sam_missile: {
+    file: "models/sam_missile.glb",
+    size: 3,
+    kind: "air",
+    altitude: 12,
+  },
+  shell: { file: "models/shell.glb", size: 1.2, kind: "air", altitude: 1.5 },
 };
 
+const MODEL_BY_TYPE: Readonly<Record<string, string>> = {
+  [UT_CITY]: "city",
+  [UT_MISSILE_SILO]: "missile_silo",
+  [UT_PORT]: "port",
+  [UT_FACTORY]: "factory",
+  [UT_DEFENSE_POST]: "defense_post",
+  [UT_SAM_LAUNCHER]: "sam_launcher",
+  [UT_WARSHIP]: "warship",
+  [UT_TRANSPORT]: "transport",
+  [UT_TRADE_SHIP]: "trade_ship",
+  [UT_ATOM_BOMB]: "atom_bomb",
+  [UT_HYDROGEN_BOMB]: "hydrogen_bomb",
+  [UT_MIRV]: "mirv",
+  [UT_MIRV_WARHEAD]: "mirv_warhead",
+  [UT_SAM_MISSILE]: "sam_missile",
+  [UT_SHELL]: "shell",
+};
+
+/** The model that draws a unit, or null if it has none. */
+export function modelFor(
+  unit: Pick<UnitState, "unitType" | "trainType" | "loaded">,
+): string | null {
+  if (unit.unitType === UT_TRAIN) {
+    if (unit.trainType !== TrainType.Carriage) return "train_engine";
+    return unit.loaded ? "train_car_loaded" : "train_car";
+  }
+  return MODEL_BY_TYPE[unit.unitType] ?? null;
+}
+
+/**
+ * Models are drawn this fraction of their size in UNIT_MODELS on the World
+ * map (2000x1000). Other maps scale that by their size relative to World,
+ * so models take up about as much of the screen when the whole map is in
+ * view, within these bounds.
+ */
+const MODEL_SCALE = 0.7;
+const REFERENCE_MAP_SIZE = Math.sqrt(2000 * 1000);
+const MIN_MAP_SCALE = 0.6;
+const MAX_MAP_SCALE = 1.6;
 /** Cities grow a little with each level, up to this factor. */
 const MAX_LEVEL_SCALE = 1.4;
 const LEVEL_SCALE_STEP = 0.08;
@@ -45,6 +153,11 @@ const FOUNDATION_DEPTH = 3;
 const FOUNDATION_COLOR = 0x6b675f;
 /** Footprint corners sampled for ground height, as a fraction of size. */
 const FOOTPRINT_REACH = 0.45;
+/** Trains crossing water run on a bridge this high. */
+const BRIDGE_DECK = 0.5;
+/** Ports look for the sea this many ways round, this far out (in sizes). */
+const SEA_DIRECTIONS = 16;
+const SEA_REACH = [0.6, 1, 1.5];
 /**
  * Where higher ground hides part of a model, that part is drawn as a flat
  * see-through silhouette in the owner's colour, so hills never hide a
@@ -52,8 +165,40 @@ const FOOTPRINT_REACH = 0.45;
  * only where they're behind what's already drawn.
  */
 const GHOST_OPACITY = 0.45;
+const BLACK = new THREE.Color(0, 0, 0);
 const GHOST_ORDER = 1;
 const MODEL_ORDER = 2;
+
+/** How big models are on this map, relative to their UNIT_MODELS size. */
+export function mapScale(width: number, height: number): number {
+  const scale = Math.sqrt(width * height) / REFERENCE_MAP_SIZE;
+  return MODEL_SCALE * Math.min(MAX_MAP_SCALE, Math.max(MIN_MAP_SCALE, scale));
+}
+
+/**
+ * A model's size in tiles on a map with this scale. Structures can stand
+ * structureSpacing tiles apart in any direction, so they scale up only as
+ * far as two neighbours turned any way still can't overlap; cities then
+ * grow with their level. Trains keep their size, to fit the rails and the
+ * gap between cars.
+ */
+export function modelSize(
+  key: string,
+  level: number,
+  scale: number,
+  structureSpacing: number,
+): number {
+  const spec = UNIT_MODELS[key];
+  if (spec.kind === "train") return spec.size;
+  let size = spec.size * scale;
+  if (spec.kind === "structure") {
+    size = Math.min(size, structureSpacing / Math.SQRT2);
+  }
+  if (key === "city") {
+    size *= Math.min(MAX_LEVEL_SCALE, 1 + (level - 1) * LEVEL_SCALE_STEP);
+  }
+  return size;
+}
 
 /** Heading (radians about +Y) that points a model's bow along (dx, dy). */
 export function headingFor(dx: number, dy: number): number {
@@ -89,12 +234,50 @@ export function footprintTop(
   return top;
 }
 
+/**
+ * A fixed quarter turn per structure, so neighbours don't all look
+ * identical.
+ */
+function quarterTurn(id: number): number {
+  return (id % 4) * (Math.PI / 2);
+}
+
+/**
+ * The heading that turns a port's quay toward the sea: the average of the
+ * directions, of SEA_DIRECTIONS round it, that reach water a little way
+ * out, counting each water sample. Null if there's no water there.
+ */
+export function seaFacing(
+  isWater: (x: number, y: number) => boolean,
+  x: number,
+  y: number,
+  size: number,
+): number | null {
+  let sx = 0;
+  let sy = 0;
+  for (let k = 0; k < SEA_DIRECTIONS; k++) {
+    const a = (k / SEA_DIRECTIONS) * Math.PI * 2;
+    const dx = Math.sin(a);
+    const dy = Math.cos(a);
+    for (const reach of SEA_REACH) {
+      if (isWater(x + dx * size * reach, y + dy * size * reach)) {
+        sx += dx;
+        sy += dy;
+      }
+    }
+  }
+  if (Math.hypot(sx, sy) < 1e-6) return null;
+  return headingFor(sx, sy);
+}
+
 interface Part {
   geometry: THREE.BufferGeometry;
   material: THREE.Material;
   team: boolean;
   /** Drawn as a silhouette when hidden. The buried foundation isn't. */
   ghost: boolean;
+  /** Glowing parts (exhaust flames, tracers) cast no shadow. */
+  castShadow: boolean;
 }
 
 /** One model drawn many times: an InstancedMesh per part. */
@@ -127,7 +310,7 @@ class ModelInstances {
         part.material,
         capacity,
       );
-      mesh.castShadow = true;
+      mesh.castShadow = part.castShadow;
       mesh.receiveShadow = true;
       mesh.renderOrder = MODEL_ORDER;
       if (part.team) mesh.instanceColor = this.colors;
@@ -181,7 +364,11 @@ class ModelInstances {
   commit(count: number): void {
     for (const { mesh, ghost } of this.meshes) {
       mesh.count = count;
-      if (ghost) ghost.count = count;
+      mesh.visible = count > 0;
+      if (ghost) {
+        ghost.count = count;
+        ghost.visible = count > 0;
+      }
       mesh.instanceMatrix.needsUpdate = true;
     }
     this.colors.needsUpdate = true;
@@ -198,18 +385,23 @@ class ModelInstances {
 
 interface Tracked {
   unit: UnitState;
+  model: string;
   fromX: number;
   fromY: number;
   toX: number;
   toY: number;
   heading: number;
   targetHeading: number;
+  /** A port's turn toward the sea, worked out once it's first drawn. */
+  facing: number | null;
 }
 
 export class UnitModels {
   private readonly group = new THREE.Group();
   private readonly models = new Map<string, ModelInstances>();
-  private readonly tracked = new Map<string, Map<number, Tracked>>();
+  private readonly tracked = new Map<number, Tracked>();
+  /** This tick's units, by model. */
+  private byModel = new Map<string, Tracked[]>();
   private readonly envMap: THREE.Texture;
   private readonly ghostMaterial = new THREE.MeshBasicMaterial({
     opacity: GHOST_OPACITY,
@@ -228,19 +420,21 @@ export class UnitModels {
   private readonly rotation = new THREE.Quaternion();
   private readonly scale = new THREE.Vector3();
   private readonly color = new THREE.Color();
+  private readonly mapScale: number;
   private static readonly UP = new THREE.Vector3(0, 1, 0);
 
   constructor(
     scene: THREE.Scene,
     renderer: THREE.WebGLRenderer,
     private readonly mapW: number,
+    mapH: number,
+    private readonly structureSpacing: number,
     private readonly msPerTick: number,
     private readonly ownerColor: (ownerID: number, out: THREE.Color) => void,
+    private readonly isWater: (x: number, y: number) => boolean,
   ) {
+    this.mapScale = mapScale(mapW, mapH);
     scene.add(this.group);
-    for (const type of Object.keys(UNIT_MODELS)) {
-      this.tracked.set(type, new Map());
-    }
     // A soft studio environment so the models' metal and glass have
     // something to reflect. Only the models use it, not the terrain.
     const pmrem = new THREE.PMREMGenerator(renderer);
@@ -252,14 +446,14 @@ export class UnitModels {
   private async load(): Promise<void> {
     const loader = new GLTFLoader();
     await Promise.all(
-      Object.entries(UNIT_MODELS).map(async ([type, spec]) => {
+      Object.entries(UNIT_MODELS).map(async ([key, spec]) => {
         try {
           const gltf = await loader.loadAsync(assetUrl(spec.file));
           if (this.disposed) return;
           this.models.set(
-            type,
+            key,
             new ModelInstances(
-              this.partsOf(gltf.scene, spec.ship),
+              this.partsOf(gltf.scene, spec.kind === "structure"),
               this.ghostMaterial,
               this.group,
             ),
@@ -271,7 +465,7 @@ export class UnitModels {
     );
   }
 
-  private partsOf(root: THREE.Object3D, ship: boolean): Part[] {
+  private partsOf(root: THREE.Object3D, structure: boolean): Part[] {
     root.updateMatrixWorld(true);
     const parts: Part[] = [];
     root.traverse((obj) => {
@@ -284,9 +478,10 @@ export class UnitModels {
         material,
         team: material.name.startsWith("Team"),
         ghost: true,
+        castShadow: material.emissive.equals(BLACK),
       });
     });
-    if (!ship) parts.push(this.foundation(parts));
+    if (structure) parts.push(this.foundation(parts));
     return parts;
   }
 
@@ -319,40 +514,54 @@ export class UnitModels {
       envMap: this.envMap,
       envMapIntensity: 0.6,
     });
-    return { geometry, material, team: false, ghost: false };
+    return {
+      geometry,
+      material,
+      team: false,
+      ghost: false,
+      castShadow: true,
+    };
   }
 
   /** Take this tick's units. */
   update(units: ReadonlyMap<number, UnitState>): void {
     this.lastUpdateMs = performance.now();
     const seen = new Set<number>();
+    this.byModel = new Map();
     for (const unit of units.values()) {
-      const byId = this.tracked.get(unit.unitType);
-      if (byId === undefined || !unit.isActive) continue;
+      const model = modelFor(unit);
+      if (model === null || !unit.isActive) continue;
       seen.add(unit.id);
       const toX = unit.pos % this.mapW;
       const toY = (unit.pos - toX) / this.mapW;
       const fromX = unit.lastPos % this.mapW;
       const fromY = (unit.lastPos - fromX) / this.mapW;
       const moved = toX !== fromX || toY !== fromY;
-      const prev = byId.get(unit.id);
-      const target = moved
-        ? headingFor(toX - fromX, toY - fromY)
-        : (prev?.targetHeading ?? 0);
-      byId.set(unit.id, {
+      const prev = this.tracked.get(unit.id);
+      let target = prev?.targetHeading ?? 0;
+      if (moved) {
+        target = headingFor(toX - fromX, toY - fromY);
+        // The tail engine runs backwards.
+        if (unit.trainType === TrainType.TailEngine) target += Math.PI;
+      }
+      const s: Tracked = {
         unit,
+        model,
         fromX,
         fromY,
         toX,
         toY,
         heading: prev?.heading ?? target,
         targetHeading: target,
-      });
+        facing: prev?.facing ?? null,
+      };
+      this.tracked.set(unit.id, s);
+      let list = this.byModel.get(model);
+      if (list === undefined) this.byModel.set(model, (list = []));
+      list.push(s);
     }
-    for (const byId of this.tracked.values()) {
-      for (const id of byId.keys()) {
-        if (!seen.has(id)) byId.delete(id);
-      }
+    for (const id of this.tracked.keys()) {
+      if (!seen.has(id)) this.tracked.delete(id);
     }
   }
 
@@ -364,32 +573,38 @@ export class UnitModels {
     const t = Math.min(1, (now - this.lastUpdateMs) / this.msPerTick);
     const turn = Math.min(1, dt * TURN_RATE);
 
-    for (const [type, model] of this.models) {
-      const spec = UNIT_MODELS[type];
-      const byId = this.tracked.get(type)!;
-      model.reserve(byId.size);
+    for (const [key, model] of this.models) {
+      const spec = UNIT_MODELS[key];
+      const list = this.byModel.get(key) ?? [];
+      model.reserve(list.length);
       let i = 0;
-      for (const s of byId.values()) {
+      for (const s of list) {
         const x = s.fromX + (s.toX - s.fromX) * t + 0.5;
         const y = s.fromY + (s.toY - s.fromY) * t + 0.5;
-        let size = spec.size;
+        const size = modelSize(
+          key,
+          s.unit.level,
+          this.mapScale,
+          this.structureSpacing,
+        );
         let angle: number;
         let ground: number;
-        if (spec.ship) {
-          s.heading += turnBetween(s.heading, s.targetHeading) * turn;
-          angle = s.heading;
-          ground = 0;
-        } else {
-          // A fixed quarter turn per structure, so neighbours don't all
-          // look identical.
-          angle = (s.unit.id % 4) * (Math.PI / 2);
-          if (type === UT_CITY) {
-            size *= Math.min(
-              MAX_LEVEL_SCALE,
-              1 + (s.unit.level - 1) * LEVEL_SCALE_STEP,
-            );
+        if (spec.kind === "structure") {
+          if (key === "port") {
+            s.facing ??=
+              seaFacing(this.isWater, x, y, size) ?? quarterTurn(s.unit.id);
+            angle = s.facing;
+          } else {
+            angle = quarterTurn(s.unit.id);
           }
           ground = footprintTop(heightAt, x, y, size);
+        } else {
+          s.heading += turnBetween(s.heading, s.targetHeading) * turn;
+          angle = s.heading;
+          if (spec.kind === "ship") ground = 0;
+          else if (spec.kind === "train")
+            ground = Math.max(heightAt(x, y), BRIDGE_DECK);
+          else ground = (spec.altitude ?? 0) * this.mapScale;
         }
         this.position.set(x, ground, y);
         this.rotation.setFromAxisAngle(UnitModels.UP, angle);
