@@ -21,7 +21,7 @@ def banded_block(m, x, y, z0, sx, sy, floors, floor_h, wall):
         z += floor_h
     m.box(x, y, z, sx, sy, floor_h * 0.5, wall)
     z += floor_h * 0.5
-    m.box(x, y, z, sx - 0.014, sy - 0.014, 0.004, "TeamColor")
+    m.box(x, y, z, sx - 0.014, sy - 0.014, 0.004, "TeamRoof")
     return z + 0.004
 
 
@@ -120,7 +120,7 @@ def build_city():
 
     # North-west: round glass tower and an office slab.
     z = round_tower(m, -0.3, 0.3, top, 0.085, 0.4, 0.035)
-    m.cylinder(-0.3, 0.3, z, z + 0.01, 0.07, "TeamColor", segments=24)
+    m.cylinder(-0.3, 0.3, z, z + 0.01, 0.07, "TeamRoof", segments=24)
     m.cylinder(-0.3, 0.3, z + 0.01, z + 0.03, 0.025, "MetalLight", segments=12)
     z = banded_block(m, -0.14, 0.235, top, 0.12, 0.34, 7, 0.04, "Facade")
     rooftop_units(m, -0.14, 0.235, z, [
@@ -437,7 +437,7 @@ def build_port():
     wz = deck + 0.075
     m.box(-0.2, 0.37, deck, 0.54, 0.18, 0.075, "Cladding")
     m.extrude_x([(0.278, wz), (0.462, wz), (0.37, wz + 0.035)], -0.475, 0.075,
-                "TeamColor")
+                "TeamSheet")
     for k in range(6):
         m.box(-0.42 + k * 0.08, 0.279, deck, 0.05, 0.004, 0.05, "CladdingDark")
     for k in range(5):
@@ -463,7 +463,7 @@ def sawtooth_roof(m, x0, x1, y0, y1, z, teeth, rise):
     for k in range(teeth):
         a = y0 + k * w
         m.extrude_x([(a, z), (a + w, z), (a + w, z + rise)], x0, x1,
-                    "TeamColor")
+                    "TeamSheet")
         m.box((x0 + x1) / 2, a + w + 0.0015, z + rise * 0.15, x1 - x0 - 0.01,
               0.003, rise * 0.75, "Window")
 

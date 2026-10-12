@@ -2,11 +2,14 @@
 bmesh-based mesh builder. See build_models.py for the conventions."""
 
 import math
+import os
 from contextlib import contextmanager
 
 import bpy  # must come first: it makes bmesh and mathutils importable
 import bmesh
 from mathutils import Matrix, Vector
+
+import textures
 
 # ---------------------------------------------------------------------------
 # Materials
@@ -16,6 +19,9 @@ PALETTE = {
     "TeamColor": ("#ffffff", 0.7, 0.0),
     "TeamDeck": ("#d4d4d4", 0.75, 0.0),
     "TeamGlass": ("#a4a4a4", 0.25, 0.35),
+    "TeamRoof": ("#ffffff", 0.8, 0.0),
+    "TeamSheet": ("#ffffff", 0.55, 0.2),
+    "TeamHull": ("#ffffff", 0.7, 0.0),
     "Facade": ("#dcdad4", 0.8, 0.0),
     "FacadeWarm": ("#c9b9a3", 0.85, 0.0),
     "Window": ("#2f3d4b", 0.25, 0.2),
@@ -61,6 +67,52 @@ PALETTE = {
 }
 
 
+# material: (texture set in textures.py, size of one repeat of it in model
+# units). Materials not listed stay plain.
+SURFACES = {
+    "TeamColor": ("paint", 0.5),
+    "TeamDeck": ("deck", 0.5),
+    "TeamGlass": ("glass", 0.25),
+    "TeamRoof": ("roof", 0.5),
+    "TeamSheet": ("corrugated", 0.4),
+    "TeamHull": ("metal", 0.5),
+    "Facade": ("facade", 0.25),
+    "FacadeWarm": ("facade", 0.25),
+    "Window": ("window", 0.25),
+    "Asphalt": ("asphalt", 0.5),
+    "Sidewalk": ("paving", 0.25),
+    "Grass": ("grass", 0.5),
+    "Foliage": ("foliage", 0.12),
+    "MetalLight": ("metal", 0.5),
+    "MetalDark": ("metal", 0.5),
+    "Concrete": ("concrete", 0.5),
+    "ConcreteDark": ("concrete", 0.5),
+    "Hazard": ("paint", 0.5),
+    "Dark": ("paint", 0.5),
+    "Missile": ("paint", 0.5),
+    "Gantry": ("metal", 0.5),
+    "Olive": ("paint", 0.5),
+    "Cladding": ("corrugated", 0.25),
+    "CladdingDark": ("corrugated", 0.25),
+    "ContainerRed": ("corrugated", 0.25),
+    "ContainerBlue": ("corrugated", 0.25),
+    "ContainerGreen": ("corrugated", 0.25),
+    "ContainerOrange": ("corrugated", 0.25),
+    "ContainerGrey": ("corrugated", 0.25),
+    "ContainerTeal": ("corrugated", 0.25),
+    "Sand": ("ground", 0.3),
+    "SandDark": ("ground", 0.3),
+    "Gravel": ("ground", 0.3),
+    "Dirt": ("ground", 0.3),
+    "HullRed": ("metal", 0.5),
+    "Orange": ("paint", 0.5),
+}
+
+# Where the texture images are (set by build_models.py); None builds the
+# models plain, without textures.
+TEXTURE_DIR = None
+
+
 def srgb_to_linear(c):
     return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
 
@@ -70,11 +122,15 @@ def hex_to_linear(hexstr):
     return tuple(srgb_to_linear(int(h[i : i + 2], 16) / 255) for i in (0, 2, 4))
 
 
-def make_material(name, hexstr, roughness=0.8, metallic=0.0, emission=0.0):
+def make_material(name, hexstr, roughness=0.8, metallic=0.0, emission=0.0,
+                  surface=None, linear=None):
+    """Material of the given colour (or linear rgb). With a texture set
+    (surface, defaulting to SURFACES[name]) and TEXTURE_DIR set, the colour
+    multiplies the set's detail image and the set's normal map is applied."""
     mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     mat.use_nodes = True
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
-    color = (*hex_to_linear(hexstr), 1.0)
+    color = (*(linear or hex_to_linear(hexstr)), 1.0)
     bsdf.inputs["Base Color"].default_value = color
     bsdf.inputs["Roughness"].default_value = roughness
     bsdf.inputs["Metallic"].default_value = metallic
@@ -83,7 +139,40 @@ def make_material(name, hexstr, roughness=0.8, metallic=0.0, emission=0.0):
         bsdf.inputs["Emission Color"].default_value = color
         bsdf.inputs["Emission Strength"].default_value = emission
     mat.diffuse_color = color
+    surface = surface or SURFACES.get(name, (None,))[0]
+    if surface and TEXTURE_DIR:
+        add_textures(mat, bsdf, surface, color)
     return mat
+
+
+def load_image(path, non_color):
+    img = bpy.data.images.load(path, check_existing=True)
+    img.colorspace_settings.name = "Non-Color" if non_color else "sRGB"
+    return img
+
+
+def add_textures(mat, bsdf, surface, color):
+    """Detail image times the colour into Base Color (glTF exports that as
+    baseColorTexture times baseColorFactor), normal map into Normal."""
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    mean = textures.SETS[surface][2]
+    factor = tuple(min(c / mean, 1.0) for c in color[:3])
+    tex = nodes.new("ShaderNodeTexImage")
+    tex.image = load_image(textures.color_path(TEXTURE_DIR, surface), False)
+    mix = nodes.new("ShaderNodeMix")
+    mix.data_type = "RGBA"
+    mix.blend_type = "MULTIPLY"
+    mix.inputs["Factor"].default_value = 1.0
+    a, b = [i for i in mix.inputs if i.type == "RGBA"][:2]
+    b.default_value = (*factor, 1.0)
+    links.new(tex.outputs["Color"], a)
+    result = [o for o in mix.outputs if o.type == "RGBA"][0]
+    links.new(result, bsdf.inputs["Base Color"])
+    ntex = nodes.new("ShaderNodeTexImage")
+    ntex.image = load_image(textures.normal_path(TEXTURE_DIR, surface), True)
+    nmap = nodes.new("ShaderNodeNormalMap")
+    links.new(ntex.outputs["Color"], nmap.inputs["Color"])
+    links.new(nmap.outputs["Normal"], bsdf.inputs["Normal"])
 
 
 def make_palette():
@@ -122,6 +211,10 @@ class Model:
         self.materials = []
         # Applied to everything added; see at().
         self.base = Matrix()
+        # Each face's frame: the turn of the part it belongs to, which
+        # textures are laid out in (see to_object).
+        self.frame_layer = self.bm.faces.layers.int.new("frame")
+        self.frames = [Matrix.Identity(3)]
 
     @contextmanager
     def at(self, matrix):
@@ -139,11 +232,14 @@ class Model:
             self.materials.append(name)
         return self.materials.index(name)
 
-    def _finish(self, verts, material, bevel, faces_material=None):
+    def _finish(self, verts, material, bevel, faces_material=None,
+                frame=None):
         faces = {f for v in verts for f in v.link_faces}
         index = self._material_index(material)
+        self.frames.append((frame or self.base).to_quaternion().to_matrix())
         for f in faces:
             f.material_index = index
+            f[self.frame_layer] = len(self.frames) - 1
         if faces_material:
             for f, name in faces_material:
                 f.material_index = self._material_index(name)
@@ -172,7 +268,7 @@ class Model:
         matrix = matrix @ rot_z(rz)
         matrix = matrix @ scale(sx, sy, sz)
         verts = bmesh.ops.create_cube(self.bm, size=1.0, matrix=matrix)["verts"]
-        self._finish(verts, material, bevel)
+        self._finish(verts, material, bevel, frame=matrix)
 
     def cylinder(
         self, x, y, z0, z1, r1, material, r2=None, segments=12, rz=0.0,
@@ -193,7 +289,7 @@ class Model:
             depth=z1 - z0,
             matrix=matrix,
         )["verts"]
-        self._finish(verts, material, bevel)
+        self._finish(verts, material, bevel, frame=matrix)
 
     def loft(self, rings, side_materials, top_material, bottom_material,
              bevel=0.0, m=None):
@@ -215,7 +311,7 @@ class Model:
         tagged.append((self.bm.faces.new(vert_rings[-1]), top_material))
         tagged.append((self.bm.faces.new(list(reversed(vert_rings[0]))), bottom_material))
         verts = [v for ring in vert_rings for v in ring]
-        self._finish(verts, side_materials[0], bevel, tagged)
+        self._finish(verts, side_materials[0], bevel, tagged, frame=matrix)
 
     def extrude_x(self, profile, x0, x1, material, bevel=0.0):
         """Polygon in the YZ plane ((y, z) points) extruded from x0 to x1:
@@ -246,12 +342,12 @@ class Model:
         verts = bmesh.ops.create_icosphere(
             self.bm, subdivisions=subdivisions, radius=r, matrix=matrix
         )["verts"]
-        self._finish(verts, material, 0.0)
+        self._finish(verts, material, 0.0, frame=matrix)
 
     def _cube(self, matrix, material, bevel=0.0):
-        verts = bmesh.ops.create_cube(self.bm, size=1.0,
-                                      matrix=self.base @ matrix)["verts"]
-        self._finish(verts, material, bevel)
+        matrix = self.base @ matrix
+        verts = bmesh.ops.create_cube(self.bm, size=1.0, matrix=matrix)["verts"]
+        self._finish(verts, material, bevel, frame=matrix)
 
     def oriented_box(self, matrix, sx, sy, sz, material, bevel=0.0):
         """Box of size (sx, sy, sz) centred on matrix's origin."""
@@ -310,8 +406,33 @@ class Model:
         verts = [v for row in rows for v in row]
         self._finish(verts, material, 0.0)
 
+    def _layout_uvs(self):
+        """Box-projects texture coordinates in each part's own frame, so
+        textures line up with its edges and stay the same size everywhere
+        (SURFACES gives each material's repeat size). Walls get v up, so
+        streaks run down them."""
+        uv = self.bm.loops.layers.uv.verify()
+        for f in self.bm.faces:
+            surface = SURFACES.get(self.materials[f.material_index])
+            repeat = surface[1] if surface else 1.0
+            to_local = self.frames[f[self.frame_layer]].transposed()
+            n = to_local @ f.normal
+            axis = max(range(3), key=lambda i: abs(n[i]))
+            side = 1.0 if n[axis] >= 0 else -1.0
+            for loop in f.loops:
+                p = to_local @ loop.vert.co
+                if axis == 2:
+                    u, v = p.x * side, p.y
+                elif axis == 0:
+                    u, v = p.y * side, p.z
+                else:
+                    u, v = -p.x * side, p.z
+                loop[uv].uv = (u / repeat, v / repeat)
+
     def to_object(self):
         bmesh.ops.recalc_face_normals(self.bm, faces=self.bm.faces)
+        self.bm.normal_update()
+        self._layout_uvs()
         mesh = bpy.data.meshes.new(self.name)
         self.bm.to_mesh(mesh)
         self.bm.free()

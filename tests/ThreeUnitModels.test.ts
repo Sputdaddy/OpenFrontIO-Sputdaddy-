@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { UnitType } from "../packages/engine-api/src/game/GameTypes";
 import {
@@ -20,9 +21,20 @@ describe("3D unit models", () => {
     }
   });
 
-  it("ships a .glb for every model", () => {
+  it("ships every model with the buffers and textures it uses", () => {
     for (const spec of Object.values(UNIT_MODELS)) {
-      expect(existsSync(`resources/${spec.file}`), spec.file).toBe(true);
+      const path = `resources/${spec.file}`;
+      expect(existsSync(path), spec.file).toBe(true);
+      const gltf = JSON.parse(readFileSync(path, "utf8")) as {
+        buffers?: { uri: string }[];
+        images?: { uri: string }[];
+      };
+      const uris = [...(gltf.buffers ?? []), ...(gltf.images ?? [])];
+      expect(uris.length, spec.file).toBeGreaterThan(0);
+      for (const { uri } of uris) {
+        const file = join(dirname(path), decodeURIComponent(uri));
+        expect(existsSync(file), `${spec.file}: ${uri}`).toBe(true);
+      }
     }
   });
 

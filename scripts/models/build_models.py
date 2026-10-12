@@ -1,14 +1,14 @@
-"""Builds the 3D map's unit and structure models as .glb files.
+"""Builds the 3D map's unit and structure models as .gltf files.
 
 Every model is generated from code here, so it can be rebuilt or tweaked
-without hand-editing in Blender (though any .glb can be opened, edited or
+without hand-editing in Blender (though any .gltf can be opened, edited or
 replaced in Blender too, as long as it keeps the conventions below).
 
 Run with Blender's Python module or with Blender itself:
 
     pip install bpy
     python scripts/models/build_models.py --out resources/models \
-        [--only KEY ...] [--render DIR [--groups]]
+        [--only KEY ...] [--render DIR [--groups]] [--textures] [--plain]
 
     blender --background --python scripts/models/build_models.py -- \
         --out resources/models [--render DIR]
@@ -19,6 +19,10 @@ map-scale view. --groups skips the close-ups.
 
 The models live in structures.py, ships.py, vehicles.py (train cars and the
 props parked on structures and ships) and missiles.py, built with kit.py.
+Their surfaces (concrete, steel plating, glass, roofs...) are textures made
+from code in textures.py and shared by every model from <out>/textures;
+they are generated when missing, or every time with --textures. --plain
+builds the models without them, for before-and-after comparisons.
 
 Conventions the 3D map relies on:
 - Structures fit a 1x1 footprint centred on the origin; anything that moves
@@ -43,11 +47,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bpy  # noqa: E402  (must come before anything that imports bmesh)
 
-from kit import (PALETTE, hex_to_linear, make_material, make_palette, scale,  # noqa: E402
-                 translate)
+import kit  # noqa: E402
+from kit import (PALETTE, SURFACES, hex_to_linear, make_material,  # noqa: E402
+                 make_palette, scale, translate)
 import missiles  # noqa: E402
 import ships  # noqa: E402
 import structures  # noqa: E402
+import textures  # noqa: E402
 import vehicles  # noqa: E402
 
 import bmesh  # noqa: E402
@@ -91,13 +97,17 @@ MAP_SIZES = {
 # Export
 
 
-def export_glb(obj, path):
+def export_gltf(obj, path):
+    """Writes path (.gltf) and its .bin. The texture images are shared by
+    every model, so they stay in textures/ next to them rather than being
+    copied into each file."""
     bpy.ops.object.select_all(action="DESELECT")
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
     bpy.ops.export_scene.gltf(
         filepath=path,
-        export_format="GLB",
+        export_format="GLTF_SEPARATE",
+        export_keep_originals=True,
         use_selection=True,
         export_apply=True,
         export_yup=True,
@@ -124,10 +134,10 @@ def tinted_copy(obj, team_hex, location, rz=0.0, s=1.0):
         if tinted is None:
             hexstr, roughness, metallic = PALETTE[mat.name][:3]
             base = hex_to_linear(hexstr)
-            tinted = make_material(name, "#ffffff", roughness, metallic)
             color = tuple(b * t for b, t in zip(base, team))
-            bsdf = tinted.node_tree.nodes.get("Principled BSDF")
-            bsdf.inputs["Base Color"].default_value = (*color, 1.0)
+            surface = SURFACES.get(mat.name, (None,))[0]
+            tinted = make_material(name, "#ffffff", roughness, metallic,
+                                   surface=surface, linear=color)
         copy.data.materials[i] = tinted
     copy.location = location
     copy.rotation_euler = (0, 0, math.radians(rz))
@@ -327,14 +337,25 @@ def render_previews(models, out_dir, closeups=True):
 def main():
     argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else sys.argv[1:]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", required=True, help="directory for the .glb files")
+    parser.add_argument("--out", required=True,
+                        help="directory for the .gltf files")
     parser.add_argument("--render", help="directory for preview renders")
     parser.add_argument("--only", nargs="*", help="model keys to build")
     parser.add_argument("--groups", action="store_true",
                         help="with --render: only the group and map-scale views")
+    parser.add_argument("--textures", action="store_true",
+                        help="regenerate the texture images")
+    parser.add_argument("--plain", action="store_true",
+                        help="build without textures (for comparisons)")
     args = parser.parse_args(argv)
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
+    if not args.plain:
+        kit.TEXTURE_DIR = os.path.abspath(os.path.join(args.out, "textures"))
+        stale = list(textures.SETS) if args.textures else textures.missing(
+            kit.TEXTURE_DIR)
+        if stale:
+            textures.write_all(kit.TEXTURE_DIR, stale)
     make_palette()
 
     os.makedirs(args.out, exist_ok=True)
@@ -343,8 +364,8 @@ def main():
         if args.only and key not in args.only:
             continue
         obj = build()
-        path = os.path.join(args.out, key + ".glb")
-        export_glb(obj, path)
+        path = os.path.join(args.out, key + ".gltf")
+        export_gltf(obj, path)
         tris = sum(len(p.vertices) - 2 for p in obj.data.polygons)
         print(f"{key}: {tris} triangles -> {path}")
         models[key] = (obj, kind)
